@@ -1,6 +1,27 @@
 import pandas as pd
 import json
 import os
+from Bio import SeqIO
+
+COMPLEMENT = {"A": "T", "T": "A", "G": "C", "C": "G", "N": "N"}
+WBPS_RELEASE_NUMBER = "WBPS19"
+
+# Extract species name and bio project ids per species genome annotations
+clade_V_info = pd.read_excel("clade_V_info.xlsx")
+species = list(clade_V_info["Species Name"])
+bio_project_ids = list(clade_V_info["BioProject ID"])
+
+
+def reverse_compliment(seq):
+    return "".join(COMPLEMENT[base] for base in reversed(seq))
+
+
+def format_species_name(species_name):
+    formatted_name = species_name.lower().replace("_", "").split(" ")
+    if "sp." in formatted_name:
+        formatted_name.remove("sp.")
+    formatted_name = "_".join(formatted_name)
+    return formatted_name
 
 
 # Go over every gff3 file for every species and extract info about every transcript
@@ -85,25 +106,18 @@ for file_name in os.listdir(GFF_DIR):
 
 
 # Now that the info for every transcript has been saved, go through every transcript and determine the start and end
-# coordinates of the promoter region associated with each transcript
+# coordinates of the promoter region associated with each transcript for each species
 PROMOTER_MAX_LEN = 800
 os.makedirs("general_info_promoters", exist_ok=True)
 
-GENERAL_INFO_DIR = "./general_info"
-GENES_SORTED_DIR = "./genes_sorted"
-
-# Extract species name
-clade_V_info = pd.read_excel("clade_V_info.xlsx")
-species = list(clade_V_info["Species Name"].unique())
+GENERAL_INFO_DIR = "general_info"
+GENES_SORTED_DIR = "genes_sorted"
 
 i = 1
 for species_name in species:
 
     # Get the correct format for species name (e.g.: caenorhabditis_elegans instead of Caenorhabditis Elegans)
-    species_name = species_name.lower().replace("_", "").split(" ")
-    if "sp." in species_name:
-        species_name.remove("sp.")
-    species_name = "_".join(species_name)
+    species_name = format_species_name(species_name)
 
     # Get the transcripts general info file for current species
     path = f"./{GENERAL_INFO_DIR}/{species_name}_transcripts_general_info.json"
@@ -180,3 +194,58 @@ for species_name in species:
 
     print(f"Finished determining the promoter coordinates for {i} {species_name}.")
     i = i + 1
+
+# Now that the info for every transcript's promoter has been saved, go through every transcript's promoter info and
+# determine the nucleotide sequence of it for every species
+os.makedirs("promoter_sequences_per_species", exist_ok=True)
+
+GENERAL_PROMOTERS_INFO_DIR = "./general_info_promoters"
+GENOME_DIR = "./genomic_sequences"
+
+for i in range(len(species)):
+
+    species_name = species[i]
+    project_id = bio_project_ids[i]
+
+    # Get the correct format for species name (e.g.: caenorhabditis_elegans instead of Caenorhabditis Elegans)
+    species_name = format_species_name(species_name)
+
+    # Get the promoters general info file for current species
+    path = f"{GENERAL_PROMOTERS_INFO_DIR}/{species_name}_promoters_general_info.json"
+    with open(path, "r") as file:
+        promoters_info = json.load(file)
+    # Load the genomic sequences per chromosome for current species
+    path = f"{GENOME_DIR}/{species_name}.{project_id}.{WBPS_RELEASE_NUMBER}.genomic.fa"
+    genome = SeqIO.to_dict(SeqIO.parse(path, "fasta"))
+
+    promoter_sequences = {}
+
+    # Go through every transcript and extract the promoter sequence
+    for transcript_id, info in promoters_info.items():
+        chrom = info["chromosome"]
+        strand = info["strand"]
+        start = info["start"]
+        end = info["end"]
+
+        # Access chromosome sequence
+        chrom_seq = genome[chrom].seq
+        max_chrom_len = len(chrom_seq)
+        # update end in case it is greater than length of chromosome
+        end = min(end, max_chrom_len)
+
+        # Access sequence
+        promoter_seq = str(chrom_seq[start - 1:end]).upper()
+
+        if strand == "-":
+            promoter_seq = reverse_compliment(promoter_seq)
+
+        # Save the info of the current transcript
+        promoter_sequences[transcript_id] = {"parent_gene_id": info["parent_gene_id"],
+                                             "promoter_sequence": promoter_seq}
+
+    # Save the promoters sequences for current species as a json file
+    file_name = f"./promoter_sequences_per_species/{species_name}_promoter_sequences.json"
+    with open(file_name, "w") as file:
+        json.dump(promoter_sequences, file, indent=4)
+
+    print(f"Finished determining the promoter sequences for {i+1} {species_name}.")
