@@ -5,6 +5,7 @@ from Bio import SeqIO
 
 COMPLEMENT = {"A": "T", "T": "A", "G": "C", "C": "G", "N": "N"}
 WBPS_RELEASE_NUMBER = "WBPS19"
+SOURCE_SPECIES = "caenorhabditis_elegans"
 
 # Extract species name and bio project ids per species genome annotations
 clade_V_info = pd.read_excel("clade_V_info.xlsx")
@@ -13,10 +14,16 @@ bio_project_ids = list(clade_V_info["BioProject ID"])
 
 
 def reverse_compliment(seq):
+    """Return the reverse complement of a string of bases"""
     return "".join(COMPLEMENT[base] for base in reversed(seq))
 
 
 def format_species_name(species_name):
+    """Return a formatted form of <species_name> that corresponds to the format used in the file names.
+    Examples:
+        - Caenorhabditis Elegans would be formatted to caenorhabditis_elegans.
+        - Theristus sp. LFF4_11 would be formatted to theristus_lff411
+    """
     formatted_name = species_name.lower().replace("_", "").split(" ")
     if "sp." in formatted_name:
         formatted_name.remove("sp.")
@@ -26,8 +33,12 @@ def format_species_name(species_name):
 
 # Go over every gff3 file for every species and extract info about every transcript
 # {chromosome, strand, start, end, parent_gene} as well as the sorted genes per chromosome in ascending order
-os.makedirs("general_info", exist_ok=True)
-os.makedirs("genes_sorted", exist_ok=True)
+
+GENERAL_INFO_DIR = "general_info"
+GENES_SORTED_DIR = "genes_sorted"
+
+os.makedirs(GENERAL_INFO_DIR, exist_ok=True)
+os.makedirs(GENES_SORTED_DIR, exist_ok=True)
 
 i = 1
 GFF_DIR = "./annotation_sequences"
@@ -95,10 +106,10 @@ for file_name in os.listdir(GFF_DIR):
     }
 
     # Save the mRNA_info and genes_sorted as separate json files
-    file_name = f"./general_info/{species_name}_transcripts_general_info.json"
+    file_name = f"./{GENERAL_INFO_DIR}/{species_name}_transcripts_general_info.json"
     with open(file_name, "w") as file:
         json.dump(mRNA_info, file, indent=4)
-    file_name = f"./genes_sorted/{species_name}_genes_sorted.json"
+    file_name = f"./{GENES_SORTED_DIR}/{species_name}_genes_sorted.json"
     with open(file_name, "w") as file:
         json.dump(genes_sorted, file, indent=4)
 
@@ -108,10 +119,9 @@ for file_name in os.listdir(GFF_DIR):
 # Now that the info for every transcript has been saved, go through every transcript and determine the start and end
 # coordinates of the promoter region associated with each transcript for each species
 PROMOTER_MAX_LEN = 800
-os.makedirs("general_info_promoters", exist_ok=True)
 
-GENERAL_INFO_DIR = "general_info"
-GENES_SORTED_DIR = "genes_sorted"
+GENERAL_PROMOTERS_INFO_DIR = "general_info_promoters"
+os.makedirs(GENERAL_PROMOTERS_INFO_DIR, exist_ok=True)
 
 i = 1
 for species_name in species:
@@ -192,7 +202,7 @@ for species_name in species:
                                          "parent_gene_id": gene_id}
 
     # Save the promoters_info for current species as a json file
-    file_name = f"./general_info_promoters/{species_name}_promoters_general_info.json"
+    file_name = f"./{GENERAL_PROMOTERS_INFO_DIR}/{species_name}_promoters_general_info.json"
     with open(file_name, "w") as file:
         json.dump(promoters_info, file, indent=4)
 
@@ -201,10 +211,10 @@ for species_name in species:
 
 # Now that the info for every transcript's promoter has been saved, go through every transcript's promoter info and
 # determine the nucleotide sequence of it for every species
-os.makedirs("promoter_sequences_per_species", exist_ok=True)
+PROMOTER_SEQUENCES_DIR = "promoter_sequences_per_species"
+os.makedirs(PROMOTER_SEQUENCES_DIR, exist_ok=True)
 
-GENERAL_PROMOTERS_INFO_DIR = "./general_info_promoters"
-GENOME_DIR = "./genomic_sequences"
+GENOME_DIR = "genomic_sequences"
 
 for i in range(len(species)):
 
@@ -215,11 +225,11 @@ for i in range(len(species)):
     species_name = format_species_name(species_name)
 
     # Get the promoters general info file for current species
-    path = f"{GENERAL_PROMOTERS_INFO_DIR}/{species_name}_promoters_general_info.json"
+    path = f"./{GENERAL_PROMOTERS_INFO_DIR}/{species_name}_promoters_general_info.json"
     with open(path, "r") as file:
         promoters_info = json.load(file)
     # Load the genomic sequences per chromosome for current species
-    path = f"{GENOME_DIR}/{species_name}.{project_id}.{WBPS_RELEASE_NUMBER}.genomic.fa"
+    path = f"./{GENOME_DIR}/{species_name}.{project_id}.{WBPS_RELEASE_NUMBER}.genomic.fa"
     genome = SeqIO.to_dict(SeqIO.parse(path, "fasta"))
 
     promoter_sequences = {}
@@ -248,7 +258,7 @@ for i in range(len(species)):
                                              "promoter_sequence": promoter_seq}
 
     # Save the promoters sequences for current species as a json file
-    file_name = f"./promoter_sequences_per_species/{species_name}_promoter_sequences.json"
+    file_name = f"./{PROMOTER_SEQUENCES_DIR}/{species_name}_promoter_sequences.json"
     with open(file_name, "w") as file:
         json.dump(promoter_sequences, file, indent=4)
 
@@ -273,44 +283,67 @@ ortho_genes = ortho_genes[ortho_genes['Species'].isin(species_to_keep)]  # Only 
 ortho_genes = ortho_genes[~ortho_genes['caenorhabditis_elegans.PRJNA13758.WBPS19_filtered.protein'].str.contains(',') &
                           ~ortho_genes['Orthologs'].str.contains(',')]
 
-PROMOTER_SEQUENCES_DIR = "./promoter_sequences_per_species"
-ORTHOLOG_PROMOTERS_DIR = "./ortholog_promoters_per_gene"
+PROMOTER_SEQUENCES_DIR = "promoter_sequences_per_species"
+ORTHOLOG_PROMOTERS_DIR = "ortholog_promoters_per_gene"
 
 os.makedirs(ORTHOLOG_PROMOTERS_DIR, exist_ok=True)
 
 i = 1
-for source_transcript, source_transcript_orthologs in ortho_genes.groupby(
-        "caenorhabditis_elegans.PRJNA13758.WBPS19_filtered.protein"):
+for source_transcript, source_transcript_orthologs in ortho_genes.groupby(f"{SOURCE_SPECIES}.PRJNA13758.WBPS19_filtered.protein"):
     source_transcript_ortholog_promoters = {}
     for _, row in source_transcript_orthologs.iterrows():
         ortholog_species = row["Species"].split(".")[0]
         ortholog_species_transcript_id = row["Orthologs"]
         # Open the promoter sequences file for <ortholog_species>
-        path = f"{PROMOTER_SEQUENCES_DIR}/{ortholog_species}_promoter_sequences.json"
+        path = f"./{PROMOTER_SEQUENCES_DIR}/{ortholog_species}_promoter_sequences.json"
         with open(path, "r") as file:
             ortholog_species_promoter_sequences = json.load(file)
         # Get the sequence of the promoter for that <ortholog_species_transcript_id>
         if ortholog_species_transcript_id in ortholog_species_promoter_sequences:
             promoter_seq = ortholog_species_promoter_sequences[ortholog_species_transcript_id]["promoter_sequence"]
-            source_transcript_ortholog_promoters[ortholog_species] = promoter_seq
         # Specifically for the transcripts of the 5 species: caenorhabditis_brenneri, caenorhabditis_briggsae,
         # caenorhabditis_japonica, caenorhabditis_remanei, and pristionchus_pacificus
         elif f"{ortholog_species_transcript_id}.1" in ortholog_species_promoter_sequences:
             promoter_seq = ortholog_species_promoter_sequences[f"{ortholog_species_transcript_id}.1"][
                 "promoter_sequence"]
-            source_transcript_ortholog_promoters[ortholog_species] = promoter_seq
         # Specifically for some transcripts of species ancylostoma_ceylanicum
         elif f"transcript:{ortholog_species_transcript_id[11:]}" in ortholog_species_promoter_sequences:
             promoter_seq = ortholog_species_promoter_sequences[f"transcript:{ortholog_species_transcript_id[11:]}"][
                 "promoter_sequence"]
-            source_transcript_ortholog_promoters[ortholog_species] = promoter_seq
         else:
             print(
                 f"Failed to fetch promoter sequence for ortholog species {ortholog_species} and transcript_id {ortholog_species_transcript_id}.")
+            continue
+        source_transcript_ortholog_promoters[ortholog_species] = promoter_seq
     # Save the ortholog promoter sequences for current <SOURCE_SPECIES> gene as a json file
-    file_name = f"{ORTHOLOG_PROMOTERS_DIR}/{source_transcript}_orthologs_promoters.json"
+    file_name = f"./{ORTHOLOG_PROMOTERS_DIR}/{source_transcript}_orthologs_promoters.json"
     with open(file_name, "w") as file:
         json.dump(source_transcript_ortholog_promoters, file, indent=4)
-    i = i + 1
     if i % 100 == 0:
         print(f"Ortholog promoters for {i} genes have bene processed.")
+    i = i + 1
+
+# Adding the promoter sequences for {SOURCE_SPECIES}
+path = f"./{PROMOTER_SEQUENCES_DIR}/{SOURCE_SPECIES}_promoter_sequences.json"
+with open(path, "r") as file:
+    c_elegans_promoter_sequences = json.load(file)
+i = 1
+for source_transcript, _ in ortho_genes.groupby(f"{SOURCE_SPECIES}.PRJNA13758.WBPS19_filtered.protein"):
+    # Load the file that already has promoter sequences for the orthologs
+    file_name = f"{ORTHOLOG_PROMOTERS_DIR}/{source_transcript}_orthologs_promoters.json"
+    with open(file_name, "r") as file:
+        transcript_file = json.load(file)
+    if source_transcript in c_elegans_promoter_sequences:
+        transcript_file[SOURCE_SPECIES] = c_elegans_promoter_sequences[source_transcript]["promoter_sequence"]
+    elif f"{source_transcript}.1" in c_elegans_promoter_sequences:
+        transcript_file[SOURCE_SPECIES] = c_elegans_promoter_sequences[f"{source_transcript}.1"]["promoter_sequence"]
+    else:
+        print(f"Wasn't able to fetch transcript_id {source_transcript} for {SOURCE_SPECIES}.")
+    # Save back the file with the promoter sequences of <SOURCE_SPECIES> added
+    with open(file_name, "w") as file:
+        json.dump(transcript_file, file, indent=4)
+    if i % 100 == 0:
+        print(f"Promoter sequences for {SOURCE_SPECIES} has been added for {i} genes.")
+    i = i + 1
+
+# Done creating the files to load into the motif-based encoder!
