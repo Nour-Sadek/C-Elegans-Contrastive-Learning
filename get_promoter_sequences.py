@@ -44,7 +44,8 @@ for file_name in os.listdir(GFF_DIR):
             features = line.strip().split()
             if features[2] not in ["mRNA", "gene"]:
                 continue
-            chrom, feature_type, start, end, strand, description = features[0], features[2], int(features[3]), int(features[4]), features[6], features[8]
+            chrom, feature_type, start, end, strand, description = features[0], features[2], int(features[3]), int(
+                features[4]), features[6], features[8]
             # Go through the attributes and extract the transcript_id and parent gene_id for this mRNA
             if feature_type == "mRNA":
                 transcript_id = None
@@ -104,7 +105,6 @@ for file_name in os.listdir(GFF_DIR):
     print(f"Finished processing {i} {species_name} gff3 annotation file.")
     i = i + 1
 
-
 # Now that the info for every transcript has been saved, go through every transcript and determine the start and end
 # coordinates of the promoter region associated with each transcript for each species
 PROMOTER_MAX_LEN = 800
@@ -149,7 +149,9 @@ for species_name in species:
             # current gene, if yes move on to the next nearby gene until we reach a gene that has different coordinates
             while True:
                 prev_gene = genes[idx_curr_gene - 1] if idx_curr_gene > 0 else None
-                if prev_gene is None or (genes_of_chrom[prev_gene][0] != genes_of_chrom[gene_id][0] and genes_of_chrom[prev_gene][1] < genes_of_chrom[gene_id][0]):
+                if prev_gene is None or (
+                        genes_of_chrom[prev_gene][0] != genes_of_chrom[gene_id][0] and genes_of_chrom[prev_gene][1] <
+                        genes_of_chrom[gene_id][0]):
                     break
                 idx_curr_gene = idx_curr_gene - 1
             if prev_gene is not None:
@@ -167,7 +169,9 @@ for species_name in species:
             # current gene, if yes move on to the next nearby gene until we reach a gene that has different coordinates
             while True:
                 next_gene = genes[idx_curr_gene + 1] if idx_curr_gene < len(genes) - 1 else None
-                if next_gene is None or (genes_of_chrom[next_gene][0] != genes_of_chrom[gene_id][0] and genes_of_chrom[next_gene][0] > genes_of_chrom[gene_id][1]):
+                if next_gene is None or (
+                        genes_of_chrom[next_gene][0] != genes_of_chrom[gene_id][0] and genes_of_chrom[next_gene][0] >
+                        genes_of_chrom[gene_id][1]):
                     break
                 idx_curr_gene = idx_curr_gene + 1
             # if next_gene is None, promoter might extend beyond the chromosome range,
@@ -248,4 +252,65 @@ for i in range(len(species)):
     with open(file_name, "w") as file:
         json.dump(promoter_sequences, file, indent=4)
 
-    print(f"Finished determining the promoter sequences for {i+1} {species_name}.")
+    print(f"Finished determining the promoter sequences for {i + 1} {species_name}.")
+
+# Final step is to generate the files that will be fed into the convolutional neural network, where each file
+# corresponds to a <SOURCE_SPECIES> gene's promoter sequences of its orthologs
+
+# Determining the ortholog genes to keep (keep only the ones with one-to-one relationship and for those species that
+# have at least 5000 one-to-one ortholog genes with <SOURCE_SPECIES>
+
+stats = pd.read_excel("./Orthologues/OrthologuesStats_one-to-one.xlsx")  # Starts with 65 species
+stats = stats.set_index('Species')
+c_elegans_stats = stats.loc['caenorhabditis_elegans.PRJNA13758.WBPS19_filtered.protein', :]
+c_elegans_stats = c_elegans_stats[c_elegans_stats >= 5000]  # 44 species are left
+
+species_to_keep = c_elegans_stats.index.tolist()
+
+ortho_genes = pd.read_csv("./Orthologues/caenorhabditis_elegans.PRJNA13758.WBPS19_filtered.protein.tsv", sep="\t")
+ortho_genes = ortho_genes[ortho_genes['Species'].isin(species_to_keep)]  # Only keep the species of interest
+# Keep the genes that have a one-to-one ortholog only
+ortho_genes = ortho_genes[~ortho_genes['caenorhabditis_elegans.PRJNA13758.WBPS19_filtered.protein'].str.contains(',') &
+                          ~ortho_genes['Orthologs'].str.contains(',')]
+
+PROMOTER_SEQUENCES_DIR = "./promoter_sequences_per_species"
+ORTHOLOG_PROMOTERS_DIR = "./ortholog_promoters_per_gene"
+
+os.makedirs(ORTHOLOG_PROMOTERS_DIR, exist_ok=True)
+
+i = 1
+for source_transcript, source_transcript_orthologs in ortho_genes.groupby(
+        "caenorhabditis_elegans.PRJNA13758.WBPS19_filtered.protein"):
+    source_transcript_ortholog_promoters = {}
+    for _, row in source_transcript_orthologs.iterrows():
+        ortholog_species = row["Species"].split(".")[0]
+        ortholog_species_transcript_id = row["Orthologs"]
+        # Open the promoter sequences file for <ortholog_species>
+        path = f"{PROMOTER_SEQUENCES_DIR}/{ortholog_species}_promoter_sequences.json"
+        with open(path, "r") as file:
+            ortholog_species_promoter_sequences = json.load(file)
+        # Get the sequence of the promoter for that <ortholog_species_transcript_id>
+        if ortholog_species_transcript_id in ortholog_species_promoter_sequences:
+            promoter_seq = ortholog_species_promoter_sequences[ortholog_species_transcript_id]["promoter_sequence"]
+            source_transcript_ortholog_promoters[ortholog_species] = promoter_seq
+        # Specifically for the transcripts of the 5 species: caenorhabditis_brenneri, caenorhabditis_briggsae,
+        # caenorhabditis_japonica, caenorhabditis_remanei, and pristionchus_pacificus
+        elif f"{ortholog_species_transcript_id}.1" in ortholog_species_promoter_sequences:
+            promoter_seq = ortholog_species_promoter_sequences[f"{ortholog_species_transcript_id}.1"][
+                "promoter_sequence"]
+            source_transcript_ortholog_promoters[ortholog_species] = promoter_seq
+        # Specifically for some transcripts of species ancylostoma_ceylanicum
+        elif f"transcript:{ortholog_species_transcript_id[11:]}" in ortholog_species_promoter_sequences:
+            promoter_seq = ortholog_species_promoter_sequences[f"transcript:{ortholog_species_transcript_id[11:]}"][
+                "promoter_sequence"]
+            source_transcript_ortholog_promoters[ortholog_species] = promoter_seq
+        else:
+            print(
+                f"Failed to fetch promoter sequence for ortholog species {ortholog_species} and transcript_id {ortholog_species_transcript_id}.")
+    # Save the ortholog promoter sequences for current <SOURCE_SPECIES> gene as a json file
+    file_name = f"{ORTHOLOG_PROMOTERS_DIR}/{source_transcript}_orthologs_promoters.json"
+    with open(file_name, "w") as file:
+        json.dump(source_transcript_ortholog_promoters, file, indent=4)
+    i = i + 1
+    if i % 100 == 0:
+        print(f"Ortholog promoters for {i} genes have bene processed.")
