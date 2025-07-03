@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-import numpy as np
 import json
+import os
+import random
 
 gb = torch.tensor([0.25, 0.25, 0.25, 0.25])
 BASE_TO_INDEX = {'A': 0, 'C': 1, 'G': 2, 'T': 3}  # bases are of the order ACGT
@@ -12,7 +13,7 @@ REVERSE_ORDER = [3, 2, 1, 0]
 
 
 # Helper functions
-def one_hot_encode_seq(seq: str, base_to_index):
+def one_hot_encode_seq(seq: str, base_to_index) -> torch.tensor:
     """output is a tensor of shape (4, seq_length) where which base each row corresponds to is determined by
     <base_to_index>."""
     seq_length = len(seq)
@@ -22,10 +23,10 @@ def one_hot_encode_seq(seq: str, base_to_index):
     return one_hot_seq
 
 
-def pad_one_hot_encoded_seq(one_hot_seq, target_length: int):
+def pad_one_hot_encoded_seq(one_hot_seq, target_length) -> torch.tensor:
     """<one_hot_seq> is of shape (4, seq_length). Return a right-padded sequence to reach <target_length>."""
     seq_length = one_hot_seq.shape[1]
-    if seq_length == target_length:
+    if seq_length == target_length:  # Do nothing
         return one_hot_seq
     elif seq_length < target_length:
         pad_length = target_length - seq_length
@@ -36,7 +37,7 @@ def pad_one_hot_encoded_seq(one_hot_seq, target_length: int):
         raise ValueError("This function cannot handle an input sequence whose length is greater than target length.")
 
 
-def rev_comp_one_hot_encoded_dna(one_hot_dna, reverse_order):
+def rev_comp_one_hot_encoded_dna(one_hot_dna, reverse_order) -> torch.tensor:
     """<one_hot_dna> is of shape (batch_size, 4, seq_length)"""
     # Reverse the sequence (columns)
     rev = torch.flip(one_hot_dna, dims=[2])
@@ -46,6 +47,67 @@ def rev_comp_one_hot_encoded_dna(one_hot_dna, reverse_order):
     rev_comp = rev[:, complement_indices, :]
 
     return rev_comp
+
+
+def read_files(files_dir, target_length, min_num_orthologs, min_sequence_length, base_to_index) -> dict[str, list[torch.tensor]]:
+    """files_dir should be the path to the directory that contains the json files that contain the orthologous promoters
+    per gene.
+    target_length is 800 for training but 500 for encoding the promoter sequences after training.
+    min_num_orthologs is 5 (family_size of 4 + 1) for training and 2 after training.
+    min_sequence_length is 10% of target_length for training and PWM_width after training."""
+    valid_genes = {}
+    for file_name in os.listdir(files_dir):
+        gene_name = file_name.split("_")[0]
+        path = os.path.join(files_dir, file_name)
+
+        with open(path, "r") as file:
+            gene_promoters = json.load(file)
+        valid_sequences = []
+        for sequence in gene_promoters.values():
+            # Check if invalid bases are present
+            if not set(sequence.upper()).issubset(base_to_index.keys()):
+                continue
+            # Check if the length of the sequence is greater than min_sequence_length
+            if min_sequence_length is not None and len(sequence) < min_sequence_length:
+                continue
+            valid_sequences.append(sequence.upper())
+        # check if enough promoter sequences are still valid
+        if len(valid_sequences) < min_num_orthologs:
+            continue
+        # One-hot encode the sequences and ensure they are as long as <target_length>
+        fixed_valid_sequences = []
+        for sequence in valid_sequences:
+            one_hot_seq = one_hot_encode_seq(sequence, base_to_index)
+            if len(sequence) < target_length:  # add 0 padding to the right
+                one_hot_seq = pad_one_hot_encoded_seq(one_hot_seq, target_length)
+            elif len(sequence) > target_length:  # truncate the sequence from the start
+                one_hot_seq = one_hot_seq[:, (target_length - len(sequence)):]
+            fixed_valid_sequences.append(one_hot_seq)
+        # Save the promoters of this gene as valid to be passed through the encoder
+        valid_genes[gene_name] = fixed_valid_sequences
+
+    return valid_genes
+
+
+def split_data(valid_genes, train_ratio=0.9, seed=2025) -> tuple[dict, dict]:
+    """Returns two dictionaries where they contain train_ratio and 1 - train_ration of the data in <valid_genes>
+    respectively and that split is randomly assigned based on the <seed> for reproducibility.
+
+    This function will be used to create train and validation data sets.
+    """
+    keys = list(valid_genes.keys())
+
+    # Randomly shuffle the keys then get the split index based on <train_ratio>
+    random.Random(seed).shuffle(keys)
+    split_idx = int(len(keys) * train_ratio)
+
+    # Split keys into train and val data sets
+    train_keys = keys[:split_idx]
+    val_keys = keys[split_idx:]
+    train_set_genes = {gene: valid_genes[gene] for gene in train_keys}
+    val_set_genes = {gene: valid_genes[gene] for gene in val_keys}
+
+    return train_set_genes, val_set_genes
 
 
 # Creating the PWM constraint for the Conv1d layer
@@ -146,12 +208,14 @@ class TrainableMotifInteractions(nn.Module):
 class MotifBasedEncoder(nn.Module):
     def __init__(self, num_PWMs=256, PWM_width=15, seq_length=800, window=10, num_bases=4):
         super(MotifBasedEncoder, self).__init__()
+        # Define the attributes of the encoder
         self.num_PWMs = num_PWMs
         self.PWM_width = PWM_width
         self.seq_length = seq_length
         self.window = window
         self.num_bases = 4
 
+        # Define the layers of the encoder
         self.PWMs_conv = nn.Conv1d(in_channels=self.num_bases, out_channels=self.num_PWMs, kernel_size=self.PWM_width,
                                    bias=False)
         self.window_pool = nn.MaxPool1d(kernel_size=self.window, stride=self.window)
