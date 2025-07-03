@@ -7,6 +7,45 @@ import numpy as np
 import json
 
 gb = torch.tensor([0.25, 0.25, 0.25, 0.25])
+BASE_TO_INDEX = {'A': 0, 'C': 1, 'G': 2, 'T': 3}  # bases are of the order ACGT
+REVERSE_ORDER = [3, 2, 1, 0]
+
+
+# Helper functions
+def one_hot_encode_seq(seq: str, base_to_index):
+    """output is a tensor of shape (4, seq_length) where which base each row corresponds to is determined by
+    <base_to_index>."""
+    seq_length = len(seq)
+    one_hot_seq = torch.zeros(len(base_to_index), seq_length, dtype=torch.float32)
+    for index, base in enumerate(seq.upper()):
+        one_hot_seq[base_to_index[base], index] = 1
+    return one_hot_seq
+
+
+def pad_one_hot_encoded_seq(one_hot_seq, target_length: int):
+    """<one_hot_seq> is of shape (4, seq_length). Return a right-padded sequence to reach <target_length>."""
+    seq_length = one_hot_seq.shape[1]
+    if seq_length == target_length:
+        return one_hot_seq
+    elif seq_length < target_length:
+        pad_length = target_length - seq_length
+        padding = torch.zeros(one_hot_seq.shape[0], pad_length)
+        padded_one_hot_dna = torch.cat([one_hot_seq, padding], dim=1)
+        return padded_one_hot_dna
+    else:  # seq_length > target_length
+        raise ValueError("This function cannot handle an input sequence whose length is greater than target length.")
+
+
+def rev_comp_one_hot_encoded_dna(one_hot_dna, reverse_order):
+    """<one_hot_dna> is of shape (batch_size, 4, seq_length)"""
+    # Reverse the sequence (columns)
+    rev = torch.flip(one_hot_dna, dims=[2])
+
+    # Get the complement of the bases (rows)
+    complement_indices = torch.tensor(reverse_order)
+    rev_comp = rev[:, complement_indices, :]
+
+    return rev_comp
 
 
 # Creating the PWM constraint for the Conv1d layer
@@ -31,10 +70,9 @@ def pwm_constraint_conv1d(conv_weights, gb):
 
 # Creating the trainable scaling layer
 class TrainableScaling(nn.Module):
-    def __init__(self, seq_length_after_conv, num_PWMs):
+    def __init__(self, num_PWMs):
         """Both the scale and bias are of size <num_PWMs> and are randomly initialized to values between 0 and 1."""
         super(TrainableScaling, self).__init__()
-        self.seq_length_after_conv = seq_length_after_conv
         self.num_PWMs = num_PWMs
 
         # Create the trainable scale parameter
@@ -46,8 +84,8 @@ class TrainableScaling(nn.Module):
     def forward(self, inputs):
         """inputs are of shape (batch_size, num_PWMs. seq_length_after_conv)"""
         # Let the scale and bias parameters match the shape of the inputs (shape = (1, num_PWMs, seq_length_after_conv))
-        scale = self.scale.unsqueeze(2).repeat(1, 1, self.seq_length_after_conv)
-        bias = self.bias.unsqueeze(2).repeat(1, 1, self.seq_length_after_conv)
+        scale = self.scale.unsqueeze(2).repeat(1, 1, inputs.shape[2])
+        bias = self.bias.unsqueeze(2).repeat(1, 1, inputs.shape[2])
 
         # Apply the scaling and bias parameters
         scaled_inputs = (scale * inputs) - bias
@@ -57,18 +95,16 @@ class TrainableScaling(nn.Module):
 
 # Creating the trainable pooling layer
 class TrainablePooling(nn.Module):
-    def __init__(self, seq_length_after_conv, num_PWMs):
+    def __init__(self, num_PWMs):
         """The pooling parameter alpha is of size <num_PWMs> and is randomly initialized to values between 0 and 1."""
         super(TrainablePooling, self).__init__()
-        self.seq_length_after_conv = seq_length_after_conv
         self.num_PWMs = num_PWMs
 
         # Create the trainable pooling parameter
         self.pooling = nn.Parameter(torch.rand(1, num_PWMs), requires_grad=True)
 
     def forward(self, inputs):
-        """inputs is of shape (batch_size, num_PWMs. seq_length_after_conv)
-        output is of shape (batch_size, num_PWMs)"""
+        """inputs is of shape (batch_size, num_PWMs. seq_length_after_conv) output is of shape (batch_size, num_PWMs)"""
         # Let the pooling parameter match the shape of the input
         alpha = torch.diag(self.pooling.view(-1))  # shape (num_PWMs, num_PWMs)
         alpha = alpha.unsqueeze(0)  # shape (1, num_PWMs, num_PWMs)
@@ -87,8 +123,8 @@ class TrainablePooling(nn.Module):
 # Creating the Motif Interactions (attention) layer
 class TrainableMotifInteractions(nn.Module):
     def __init__(self, num_PWMs):
-        """The motiff interactions matrix is of shape (num_PWMs, num_PWMs) and is randomly
-        initialized to values between 0 and 1."""
+        """The motif interactions matrix is of shape (num_PWMs, num_PWMs) and is randomly initialized to values between
+        0 and 1."""
         super(TrainableMotifInteractions, self).__init__()
         self.num_PWMs = num_PWMs
 
@@ -105,3 +141,51 @@ class TrainableMotifInteractions(nn.Module):
 
         return output
 
+
+# Creating the motif-based encoder
+class MotifBasedEncoder(nn.Module):
+    def __init__(self, num_PWMs=256, PWM_width=15, seq_length=800, window=10, num_bases=4):
+        super(MotifBasedEncoder, self).__init__()
+        self.num_PWMs = num_PWMs
+        self.PWM_width = PWM_width
+        self.seq_length = seq_length
+        self.window = window
+        self.num_bases = 4
+
+        self.PWMs_conv = nn.Conv1d(in_channels=self.num_bases, out_channels=self.num_PWMs, kernel_size=self.PWM_width,
+                                   bias=False)
+        self.window_pool = nn.MaxPool1d(kernel_size=self.window, stride=self.window)
+        self.scaling_layer = TrainableScaling(self.num_PWMs)
+        self.pooling_layer = TrainablePooling(self.num_PWMs)
+        self.attention_layer = TrainableMotifInteractions(self.num_PWMs)
+        self.batch_norm_layer = nn.BatchNorm1d(self.num_PWMs)  # gamma and beta parameters are trainable
+
+    def forward(self, inputs):
+        """inputs is of shape (batch_size, num_bases, seq_length) where the length of the sequences would
+        have been appropriately padded before being fed into this encoder to <self.seq_length>"""
+        # Get the reverse compliment of the input sequences
+        rev_comp = rev_comp_one_hot_encoded_dna(inputs, REVERSE_ORDER)
+
+        # Run both the input seqs and their reverse complements through the PWM convolutional layers
+        inputs_conv = self.PWMs_conv(inputs)  # shape (batch_size, num_PWMs, seq_length-PWM_width+1)
+        rev_comp_conv = self.PWMs_conv(rev_comp)  # same shape as <inputs_conv>
+
+        # Reverse the order of scores for <rev_comp_inputs_conv> then take better score between the forward and
+        # reverse at each position
+        rev_order_rev_comp_conv = torch.flip(rev_comp_conv, dims=[2])
+        conv_output = torch.maximum(inputs_conv, rev_order_rev_comp_conv)
+
+        # To avoid counting overlaps, take best match in a <self.window> nt window
+        conv_output = self.window_pool(conv_output)  # shape (batch_size, num_PWMs, seq_length_after_conv)
+
+        # Apply the scaling layer
+        scaled_output = torch.sigmoid(
+            self.scaling_layer(conv_output))  # shape (batch_size, num_PWMs. seq_length_after_conv)
+
+        # Apply the pooling layer
+        pooled_output = self.pooling_layer(scaled_output)  # shape (batch_size, num_PWMs)
+
+        # Apply the attention (Motif Interactions) layer followed by batch normalization
+        output = self.batch_norm_layer(self.attention_layer(pooled_output))
+
+        return output  # shape (batch_size, num_PWMs)
