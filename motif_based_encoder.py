@@ -1,14 +1,7 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
 
-import json
-import os
-import random
-
-gb = torch.tensor([0.25, 0.25, 0.25, 0.25])
-BASE_TO_INDEX = {'A': 0, 'C': 1, 'G': 2, 'T': 3}  # bases are of the order ACGT
 REVERSE_ORDER = [3, 2, 1, 0]
 
 
