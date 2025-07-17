@@ -281,9 +281,6 @@ class MotifBasedEncoder(nn.Module):
         # To avoid counting overlaps, take best match in a <self.window> nt window
         conv_output = self.window_pool(conv_output)  # shape (batch_size, num_PWMs, seq_length_after_conv)
 
-        # Do a max pool
-        output, _ = torch.max(conv_output, dim=2)  # shape (batch_size, num_PWMs)
-
         # Apply the scaling layer
         scaled_output = torch.sigmoid(
             self.scaling_layer(conv_output))  # shape (batch_size, num_PWMs. seq_length_after_conv)
