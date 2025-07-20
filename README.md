@@ -183,7 +183,7 @@ This is the MotifBasedEncoder class:
 
             return output  # shape (batch_size, num_PWMs)
 
-This is how the motif-based encoder runs through the batch of input sequences which are one-hot encoded promoter sequences:
+This is how the motif-based encoder runs through the batch of input sequences which are one-hot encoded promoter sequences:and ad
 - The reverse complements of the input sequences are computed and then both the forward and reverse sequences are scanned 
 over by the convolutional layer whose weights represent the PWMs to be learned. After that, the scanned values for the 
 reverse complements are flipped and the max score between the forward and reverse scans at each position are chosen. 
@@ -208,7 +208,8 @@ sequences to be added to the target set are run through the encoder to get their
 loss is calculated, which as explained previously, is aimed to change the encoder parameters so that positive representations
 aer closer in distance (representations of the family embedding and another member of the same gene family) and negative 
 representations are farther apart (representations of a family embedding and another sequences that isn't part of the 
-gene family that that family embedding represents). 
+gene family that that family embedding represents). The training is done through the `train_motif_based_encoder` 
+function, and the calculation of the infoNCE loss is done through the `infoNCE_loss` function.
 
 ### 4.2 How the genes and orthologous sequences for each gene are chosen to be part of training
 
@@ -217,9 +218,11 @@ that criteria are considered during training, as well as other constraints such 
 involved should be at least 10% of the size limit which is 80bp (10% of 800bp), after which the remaining sequences that 
 will be used for training are padded so that all of them are 800bp and are subsequently one-hot encoded. With a family 
 size of 8 and a minimum size limit of 80bp, a total of 12403 genes with a total number of 335816 orthologous promoter 
-sequences were considered as valid for the encoder, with these genes being split 90% for training and 10% for validation.
+sequences were considered as valid for the encoder, with these genes being split 90% for training and 10% for validation. 
+Determining which genes are chosen is done through the `read_files` function, and the 90/10 split is done using the 
+`split_data` function.
 
-### 4.3 Chosen hyperparameters for training
+### 4.3 Manually chosen hyperparameters for training
 
 These are few of the hyperparameters chosen for the encoder:
 - family size of 8
@@ -232,9 +235,37 @@ These are few of the hyperparameters chosen for the encoder:
 - temperature of 0.1 for the infoNCE loss
 - 100 epochs of training
 
-However, it has been tricky to train the encoder and so hyperparameter tuning of these parameters would be done. Also, so 
-far, the weights of the PWM were being constrained after every parameter update, but it seems interesting to try only 
-applying the constraint after training is done rather than multiple times during training.
+With these hyperparameter values, the minimum validation loss of around 4.3-4.5 was reached, with validation accuracy of around 23%, 
+and that was after the PWM constraint was not being applied after every parameter update, but rather leaving the update until 
+the model finishes training. Whenever the PWM weights were being constrained during training, the weights would get stuck 
+at 0.25 and the validation loss would be around 5.8-5.9 and have fluctuating accuracy values. So, from on, PWM weight 
+updates to fit PWM probability values will only be done after the model is finished training, and that is only to 
+extract the PWM matrices dor further analysis and motif database comparisons.
+
+The loss and accuracy plots for both the training and validation data sets over 100 epochs using the above hyperparameters:
+
+<img width="2967" height="2968" alt="Image" src="https://github.com/user-attachments/assets/d81c82b8-82e9-488c-a0fa-73899c673099" />
+
+### 4.4 hyperparameter tuning using Pytorch-lightning and Optuna
+
+While a random classifier would have a 1/400 = 0.25 % classification accuracy and so the current 23% is far from random, 
+we can try and aim for higher accuracy and lower loss values for the validation data set to build better representations 
+and learn better PWM matrices. For that purpose, we sought to perform hyperparameter tuning for these 4 hyperparameters 
+using the pytorch-lightning and optuna packages:
+- learning rate, between 0.0001 - 0.1
+- temperature, between 0.05 - 0.9
+- target set size, either 400, 600, or 800
+- batch size, either 32, 64, 128, or 256
+
+After running 20 trials where each trial runs for a maximum of 10 epochs, the trial that reached the minimum validation loss 
+of 5.07 was the one with the following hyperparameters:
+    batch_size = 64 | learning_rate = 0.0086 | temperature = 0.084 | target_set_size = 400
+After using these values and training the model again, modest improvement was evident where the validation loss went down 
+to around 4.1 and validation accuracy went up to around 25-28%.
+
+The loss and accuracy plots for both the training and validation data sets over 100 epochs using the above tuned hyperparameters:
+
+<img width="2967" height="2968" alt="Image" src="https://github.com/user-attachments/assets/0a2dfc81-cab5-4063-b947-e6ac9bb237af" />
 
 ## 8. References
 
