@@ -5,18 +5,54 @@ from Bio.SeqRecord import SeqRecord
 
 import json
 import os
+import requests
 import pandas as pd
 
 import torch
 from motif_based_encoder import MotifBasedEncoder, ReverseHomologyModel
 
+ENSEMBL_REST = "https://rest.ensembl.org"
+SOURCE_SPECIES = "caenorhabditis_elegans"
+
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
+
+
+def determine_rhiepa_representation(model: MotifBasedEncoder, valid_genes: dict[str, list[torch.tensor]],
+                                    file_name: str = "rhiepa_representation") -> None:
+    """Save the representation for every gene's promoter in <valid_genes> as determined by the trained model <model> as
+    a json file of the form dict[str, dict[str, float]]
+
+    The json file is a dictionary of the form:
+    key: gene id (string)
+    value: dictionary where the key is the matrix name (generated in the function) and the value is the corresponding
+    PAM score for that PWM for that gene. There is a PAM score for every PWM which the model learned during previous
+    training. The PAM scores are determined by taking the average of the representation of all the orthologous
+    sequences for each gene."""
+
+    representation = {}
+    motifs_names = [f"matrix_{i}" for i in range(len(model.PWMs_conv.weight))]
+    i = 1
+    for gene in valid_genes:
+        inputs = torch.stack(valid_genes[gene])  # shape (num_orthologs, num_bases, seq_length)
+        inputs = inputs.to(device)
+        seqs_embeddings = model(inputs)  # shape (num_orthologs, num_PWMs)
+        pam_scores = torch.mean(seqs_embeddings, dim=0)
+        representation[gene] = dict(zip(motifs_names, pam_scores.tolist()))
+        print(f"Representation for gene {i}: {gene} has been determined.")
+        i = i + 1
+
+    # Save the representation as a json file
+    with open(f"{file_name}.json", "w") as file:
+        json.dump(representation, file, indent=4)
+
 
 def create_java_treeview_files(file_path: str, gene_ids_names_descriptions_file_path: str, cluster_method: str = "a",
                                distance_function: str = "u") -> None:
     """<file_path> is a string that represents the path to the json file that would be created after calling the
-    <get_rhiepa_representations> function and saving its output as a json file in <using_the_model.py>. It is a
-    dictionary of the format: key is the gene id and the value is another dictionary where the key is the motif_name and
-    the value is the PAM score.
+    <determine_rhiepa_representation> function and saving its output as a json file. It is a dictionary of the format:
+    key is the gene id and the value is another dictionary where the key is the motif_name and the value is the PAM
+    score.
 
     This function takes this representation file, performs hierarchical clustering with the <cluster_method> clustering
     method and <distance_function> distance function using Cluster 3.0, then saves the resulting tree structure as Java
@@ -27,7 +63,9 @@ def create_java_treeview_files(file_path: str, gene_ids_names_descriptions_file_
 
     <gene_ids_descriptions_file_path> is a json file that maps each gene id with its corresponding gene name and
     description, if available. If this parameter is given, then instead of the row names being only the gene ids, they
-    would also include the gene name and description in the this format: gene_id | gene_name | gene_description."""
+    would also include the gene name and description in this format: gene_id | gene_name | gene_description. This json
+    file can be created by running the <get_gene_descriptions_names> function and saving the output dictionary as a json
+    file."""
 
     # Get the file name
     file_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -163,10 +201,51 @@ def convert_json_to_fasta(json_folder_path: str, output_folder_path: str) -> Non
     print(f"Successfully converted JSON files to FASTA files and saved to: {output_folder_path}.")
 
 
+def get_gene_descriptions_names(gene_ids: list[str]) -> dict[str: list[str]]:
+    """Return a dictionary where there are three different key-value pairs which are parallel lists where the values at
+    each position relate to each other; it is in this format to be able to easily be loaded as a pandas dataframe.
+
+    first key is "gene_id" where its value is a list of WormBase gene ids, where those are taken from the <gene_ids>
+    list argument
+    second key is "gene_name" and third key is "description" where their values are lists whose contents are filled by
+    fetch requests using Ensembl's API through the URL: <ENSEMBL_REST>/lookup/id/<gene_id>?expand=1;species=<SOURCE_SPECIES>.
+    If that url doesn't contain corresponding values for a gene_id of either, they are replaced with an empty string."""
+
+    gene_info = {"gene_id": [], "gene_name": [], "description": []}
+    i = 1
+    for gene_id in gene_ids:
+        # Get gene info for source species
+        url = f"{ENSEMBL_REST}/lookup/id/{gene_id}?expand=1;species={SOURCE_SPECIES}"
+        r = requests.get(url, headers={"content-Type": "application/json"})
+        if r.ok:
+            if i % 1000 == 0:
+                print(f"{i} gene id information have been fetched.")
+            i = i + 1
+            # Get the common gene name, if it is available, else the canonical transcript name
+            request = r.json()
+            if "display_name" in request:
+                gene_name = request["display_name"]
+            else:
+                if "canonical_transcript" in request:
+                    gene_name = request["canonical_transcript"]
+                else:
+                    gene_name = ""
+            # Get the gene description, if it is available
+            if "description" in request:
+                description = request["description"]
+            else:
+                description = ""
+            # Add the information to the dictionary
+            gene_info["gene_id"].append(gene_id)
+            gene_info["gene_name"].append(gene_name)
+            gene_info["description"].append(description.split("[")[0].strip())
+    return gene_info
+
+
 if __name__ == "__main__":
 
-    model_type = "MotifBasedEncoder"  # "MotifBasedEncoder" or "ReverseHomologyModel
-    model_path = f"./model_outputs_promoter_caenorhabditis_only_proj_head_PWMs_constrained/model_after_training.pt"
+    model_type = None  # "MotifBasedEncoder" or "ReverseHomologyModel
+    model_path = f"../model_outputs_promoter_clad_V_proj_head_PWMs_constrained_fam_size_8/model_after_training.pt"
     meme_file_name = "my_motifs"
     num_PWMs = 256
     PWM_width = 15
