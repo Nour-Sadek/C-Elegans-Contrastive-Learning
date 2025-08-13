@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.nn.init as init
 
 COMPLEMENT_ORDER = torch.tensor([3, 2, 1, 0])
+GB = torch.tensor([0.25, 0.25, 0.25, 0.25])
 
 
 # Helper functions
@@ -46,13 +47,13 @@ class ReverseComplement(nn.Module):
     The input needs to be of shape (n, num_bases, seq_length) where n is the number of one-hot encoded sequences in the
     tensor, num_bases = 4 for nucleotides, and seq_length is the length of the sequences."""
 
-    def __init__(self, complement_order: torch.tensor):
+    def __init__(self):
         super(ReverseComplement, self).__init__()
-        self.complement_order = complement_order
+        self.complement_order = COMPLEMENT_ORDER
 
     def forward(self, inputs):
-        """Return the reverse complement of <inputs> which is of shape (batch_size * (family_size + 1), num_bases,
-        seq_length), as in it the sequences are one-hot-encoded.
+        """Return the reverse complement of <inputs> which is of shape (num_seqs, num_bases, seq_length), and these
+        sequences are one-hot-encoded.
 
         <self.complement_order> determines the new order of the bases so that the new sequences would be the complement
         of those in <inputs>."""
@@ -70,12 +71,12 @@ class PWMConstraint(nn.Module):
     """Defines a module whose action is to return a PWM constrained version of the inputs; how that constraint is
     applied is done similarly to how it was done in Alan et al. 2025.
 
-    The input needs to be of shape (num_PWMs, num_bases, PWM-width), and so each PWM's weights would be constrained so
+    The input needs to be of shape (num_PWMs, num_bases, PWM_width), and so each PWM's weights would be constrained so
     that the values reflect the values of a valid PWM."""
 
-    def __init__(self, gb: torch.tensor):
+    def __init__(self):
         super(PWMConstraint, self).__init__()
-        self.gb = gb
+        self.gb = GB
 
     def forward(self, inputs):
         """Return a version of the <inputs> tensor which abides by rules so that its values can be interpreted as those
@@ -105,8 +106,9 @@ class TrainableScaling(nn.Module):
     """Define a Trainable Scaling module similarly to how it was defined in Ali et al. 2023 paper where it applies a
     motif-based scale and offset to the convolutional output of each PWM scan.
 
-    The input needs to be of shape (n, num_PWMs, seq_length_after_conv) where n is the number of original one-hot
-    encoded tensors and seq_length_after_conv is the length of each sequence after it has been scanned by each PWM."""
+    The input needs to be of shape (num_seqs, num_PWMs, seq_length_after_conv) where num_seqs is the number of original
+    one-hot encoded tensors and seq_length_after_conv is the length of each sequence after it has been scanned by each
+    PWM."""
 
     def __init__(self, num_PWMs: int):
         """Both the scale and bias are of size <num_PWMs> and are randomly initialized to values between 0 and 1. That
@@ -125,7 +127,7 @@ class TrainableScaling(nn.Module):
     def forward(self, inputs):
         """Return a scaled version of <inputs>, which is determined by the trainable <self.scale> and <self.bias>
         parameters, implemented similarly to how it was outlined in Ali et al. 2023 paper. <inputs> and the return
-        value of the function are of shape (batch_size * (family_size + 1), num_PWMs, seq_length_after_conv)."""
+        value of the function are of shape (num_seqs, num_PWMs, seq_length_after_conv)."""
 
         # Let the scale and bias parameters match the shape of the inputs (shape = (1, num_PWMs, seq_length_after_conv))
         scale = self.scale.unsqueeze(2).repeat(1, 1, inputs.shape[2])
@@ -143,13 +145,13 @@ class TrainablePooling(nn.Module):
     motif-based pooling weight to the convolutional layer output after scaling, allowing the sampling of all possible
     motif aggregation strategies from max to average pooling.
 
-    The input needs to be of shape (n, num_PWMs, seq_length_after_conv), which again should be the outputs of the
+    The input needs to be of shape (num_seqs, num_PWMs, seq_length_after_conv), which again should be the outputs of the
     TrainableScaling layer.
     """
 
     def __init__(self, num_PWMs: int):
         """The pooling parameter alpha is of size <num_PWMs> and is randomly initialized to values between 0 and 1.
-        That initialization is changed in the <MotifBasedEncoder> class so that the values are 1."""
+        That initialization is changed in the <MotifBasedEncoder> class so that the values are 2."""
 
         super(TrainablePooling, self).__init__()
         self.num_PWMs = num_PWMs
@@ -161,20 +163,20 @@ class TrainablePooling(nn.Module):
         """Return a pooled version of <inputs>, which is determined by the trainable <self.pooling> parameter,
         implemented similarly to how it was outlined in Ali et al. 2023 paper.
 
-        <inputs> is of shape (batch_size * (family_size + 1), num_PWMs, seq_length_after_conv>) and the return value of
-        the function is of the shape (batch_size * (family_size + 1), num_PWMs)."""
+        <inputs> is of shape (num_seqs, num_PWMs, seq_length_after_conv>) and the return value of the function is of the
+        shape (num_seqs, num_PWMs)."""
 
         # Let the pooling parameter match the shape of the input
         alpha = torch.diag(self.pooling.view(-1))  # shape (num_PWMs, num_PWMs)
         alpha = alpha.unsqueeze(0)  # shape (1, num_PWMs, num_PWMs)
 
         # Calculate the pooling weights w
-        w = torch.matmul(alpha, inputs)  # shape of w (batch_size, num_PWMs, seq_length_after_conv)
+        w = torch.matmul(alpha, inputs)  # shape of w (num_seqs, num_PWMs, seq_length_after_conv)
         w = F.softmax(w, dim=2)
 
         # Use the pooling weights <w> to aggregate <inputs> across <seq_length_after_conv>
         pooled_inputs = torch.mul(w, inputs)
-        pooled_inputs = pooled_inputs.sum(dim=2)  # shape (batch_size, num_PWMs)
+        pooled_inputs = pooled_inputs.sum(dim=2)  # shape (num_seqs, num_PWMs)
 
         return pooled_inputs
 
@@ -183,7 +185,7 @@ class TrainablePooling(nn.Module):
 class TrainableMotifInteractions(nn.Module):
     """Define a Trainable Motif Interaction module similarly to how it was defined in Ali et al. 2023 paper where it
     applies motifs interaction-dependent weights to the output of the TrainablePooling layer, which allows to take into
-    account the contribution of other TFs (motifs), consequently the input needs to be of shape (n, num_PWMs)."""
+    account the contribution of other TFs (motifs), consequently the input needs to be of shape (nun_seqs, num_PWMs)."""
 
     def __init__(self, num_PWMs: int):
         """The motif interactions matrix is of shape (num_PWMs, num_PWMs) and is randomly initialized to values between
@@ -199,13 +201,13 @@ class TrainableMotifInteractions(nn.Module):
     def forward(self, inputs):
         """Return an interaction-dependent weight scaled version of <inputs>, which is determined by the trainable
         <self.motif_interactions> parameter, implemented similarly to how it was outlined in Ali et al. 2023 paper.
-        <inputs> and the return value of the function are of shape (batch_size * (family_size + 1), num_PWMs)."""
+        <inputs> and the return value of the function are of shape (num_seqs, num_PWMs)."""
 
         # Calculate the interaction-dependent weight w
-        w = torch.sigmoid(torch.matmul(inputs, self.motif_interactions))  # shape (batch_size, num_PWMs)
+        w = torch.sigmoid(torch.matmul(inputs, self.motif_interactions))  # shape (num_seqs, num_PWMs)
 
         # Determine each motif contribution using <w> (element-wise multiplication)
-        output = torch.mul(w, inputs)  # shape (batch_size, num_PWMs)
+        output = torch.mul(w, inputs)  # shape (num_seqs, num_PWMs)
 
         return output
 
@@ -216,25 +218,26 @@ class MotifBasedEncoder(nn.Module):
     a series of ReverseComplement, 1D Convolutions, Scaling, Pooling, and Attention layers into the input sequences so
     that the model can learn PWM weights that are interpretable and biologically significant.
 
-    The input needs to be of shape (n, num_bases, seq_length) which represents n one-hot encoded sequences to be
-    encoded by the model."""
+    The input needs to be of shape (num_seqs, num_bases, seq_length) which represents num_seqs one-hot encoded sequences
+    to be encoded by the model."""
 
     def __init__(self, num_PWMs: int = 256, PWM_width: int = 15, window: int = 10, num_bases: int = 4,
-                 gb: torch.tensor = torch.tensor([0.25, 0.25, 0.25, 0.25]),
-                 complement_order: torch.tensor = COMPLEMENT_ORDER, set_initial_values: bool = True):
+                 set_initial_values: bool = True, consider_reverse_complement=True):
         """This MotifBasedEncoder follows the same model architecture as the one outlined in Alan et al. 2025 paper."""
+
         super(MotifBasedEncoder, self).__init__()
         # Define the attributes of the encoder
         self.num_PWMs = num_PWMs
         self.PWM_width = PWM_width
         self.window = window
         self.num_bases = num_bases
-        self.gb = gb
-        self.complement_order = complement_order
+        self.gb = GB
+        self.complement_order = COMPLEMENT_ORDER
+        self.consider_reverse_complement = consider_reverse_complement
 
         # Define the layers of the encoder
-        self.reverse_complement = ReverseComplement(self.complement_order)
-        self.PWM_constraint = PWMConstraint(self.gb)
+        self.reverse_complement = ReverseComplement()
+        self.PWM_constraint = PWMConstraint()
         self.PWMs_conv = nn.Conv1d(in_channels=self.num_bases, out_channels=self.num_PWMs, kernel_size=self.PWM_width,
                                    bias=False)
         self.window_pool = nn.MaxPool1d(kernel_size=self.window, stride=self.window, ceil_mode=True)
@@ -249,49 +252,66 @@ class MotifBasedEncoder(nn.Module):
             init.constant_(self.scaling_layer.scale, 1.0)
             init.constant_(self.scaling_layer.bias, 0.0)
             # For the pooling layer
-            init.constant_(self.pooling_layer.pooling, 1.0)
+            init.constant_(self.pooling_layer.pooling, 2.0)
             # For the attention layer
             init.eye_(self.attention_layer.motif_interactions)
 
     def forward(self, inputs):
         """Return the representation vectors for each one-hot encoded sequence in <inputs>. <inputs> is of shape
-        (batch_size * (family_size + 1), num_bases, seq_length), and the length of the sequences would have been
-        appropriately padded and/or truncated before being fed into this encoder to <seq_length>.
+        (num_seqs, num_bases, seq_length), and the length of the sequences would have been appropriately padded and/or
+        truncated before being fed into this encoder to <seq_length>.
 
-        First the sequences would be reverse complemented using the ReverseComplement module and then both would be fed
-        to a conv1d module, after which the output values from the reverse-complemented would be reversed and the
-        maximum value between the forward and reverse scans would be kept, after which a max pool of window
-        <self.window> is applied. After that the outputs are fed into the TrainableScaling, TrainablePooling, then
-        TrainableMotifInteractions modules, followed by a batch normalization layer.
+        First the sequences would be PWM scaled through the PWM_constraint module, then reverse complemented using the
+        ReverseComplement module and then both would be fed to a conv1d module, after which the output values from the
+        reverse-complemented would be reversed and the maximum value between the forward and reverse scans would be
+        kept. If <consider_reverse_complement> was set to False, then the original input only would be fed into the
+        conv1d module. After that, a max pool of window <self.window> is applied. After that the outputs are fed into
+        the TrainableScaling, TrainablePooling, then TrainableMotifInteractions modules, followed by a batch
+        normalization layer.
 
-        The output of the encoder is of shape (batch_size * (family_size + 1), num_PWMs)."""
-        
-        # Get the reverse compliment of the input sequences
-        rev_comp = self.reverse_complement(inputs)
+        The output of the encoder is of shape (num_seqs, num_PWMs)."""
 
-        # Run both the input seqs and their reverse complements through the PWM convolutional layers
-        inputs_conv = self.PWMs_conv(inputs)  # shape (batch_size, num_PWMs, seq_length-PWM_width+1)
-        rev_comp_conv = self.PWMs_conv(rev_comp)  # same shape as <inputs_conv>
+        scaled_PWM_weights = self.PWM_constraint(self.PWMs_conv.weight)
 
-        # Reverse the order of scores for <rev_comp_inputs_conv> then take better score between the forward and
-        # reverse at each position
-        rev_order_rev_comp_conv = torch.flip(rev_comp_conv, dims=[2])
-        conv_output = torch.maximum(inputs_conv, rev_order_rev_comp_conv)
+        if self.consider_reverse_complement:  # for promoter sequences
+
+            # Get the reverse compliment of the input sequences
+            rev_comp = self.reverse_complement(inputs)
+
+            # Run both the input seqs and their reverse complements through the PWM convolutional layers
+            inputs_conv = F.conv1d(inputs, scaled_PWM_weights, bias=None, stride=self.PWMs_conv.stride,
+                                   padding=self.PWMs_conv.padding, dilation=self.PWMs_conv.dilation,
+                                   groups=self.PWMs_conv.groups)
+            rev_comp_conv = F.conv1d(rev_comp, scaled_PWM_weights, bias=None, stride=self.PWMs_conv.stride,
+                                     padding=self.PWMs_conv.padding, dilation=self.PWMs_conv.dilation,
+                                     groups=self.PWMs_conv.groups)
+
+            # Reverse the order of scores for <rev_comp_inputs_conv> then take better score between the forward and
+            # reverse at each position
+            rev_order_rev_comp_conv = torch.flip(rev_comp_conv, dims=[2])
+            conv_output = torch.maximum(inputs_conv, rev_order_rev_comp_conv)
+
+        else:  # for 3'UTR sequences
+
+            # Run only the forward input seqs through the PWM convolutional layer
+            conv_output = F.conv1d(inputs, scaled_PWM_weights, bias=None, stride=self.PWMs_conv.stride,
+                                   padding=self.PWMs_conv.padding, dilation=self.PWMs_conv.dilation,
+                                   groups=self.PWMs_conv.groups)
 
         # To avoid counting overlaps, take best match in a <self.window> nt window
-        conv_output = self.window_pool(conv_output)  # shape (batch_size, num_PWMs, seq_length_after_conv)
+        conv_output = self.window_pool(conv_output)  # shape (num_seqs, num_PWMs, seq_length_after_conv)
 
         # Apply the scaling layer
         scaled_output = torch.sigmoid(
-            self.scaling_layer(conv_output))  # shape (batch_size, num_PWMs. seq_length_after_conv)
+            self.scaling_layer(conv_output))  # shape (num_seqs, num_PWMs. seq_length_after_conv)
 
         # Apply the pooling layer
-        pooled_output = self.pooling_layer(scaled_output)  # shape (batch_size, num_PWMs)
+        pooled_output = self.pooling_layer(scaled_output)  # shape (num_seqs, num_PWMs)
 
         # Apply the attention (Motif Interactions) layer followed by batch normalization
         output = self.batch_norm_layer(self.attention_layer(pooled_output))
 
-        return output  # shape (batch_size, num_PWMs)
+        return output  # shape (num_seqs, num_PWMs)
 
 
 class ReverseHomologyModel(nn.Module):
@@ -299,8 +319,8 @@ class ReverseHomologyModel(nn.Module):
     MotifBasedEncoder module. This module might lead to better contrastive learning, as was observed in the simCLR
     paper.
 
-    The input needs to be of shape (n, num_bases, seq_length) which represents n one-hot encoded sequences to be
-    encoded by the model."""
+    The input needs to be of shape (num_seqs, num_bases, seq_length) which represents num_seqs one-hot encoded sequences
+    to be encoded by the model."""
 
     def __init__(self, motif_based_encoder: MotifBasedEncoder, encoder_num_PWMs: int, l2: int, l3: int):
         """A projection head is added after the <motif_based_encoder> to see if that leads to better results in terms
@@ -324,9 +344,9 @@ class ReverseHomologyModel(nn.Module):
         result of encoding them through a MotifBasedEncoder first, represented by <self.motif_based_encoder> then
         through a Multi-Layer Perceptron (MLP) projection head, represented by <self.projection_head>.
 
-        <inputs> is of shape (batch_size * (family_size + 1), num_bases, seq_length), and the output of the function is
-        of shape (batch_size, l3)."""
+        <inputs> is of shape (num_seqs, num_bases, seq_length), and the output of the function is of shape
+        (num_seqs, l3)."""
 
         motif_based_encoder_representations = self.motif_based_encoder(inputs)
         metric_embeddings = self.projection_head(motif_based_encoder_representations)
-        return metric_embeddings  # shape: (batch_size * (family_size + 1), l3)
+        return metric_embeddings  # shape: (num_seqs, l3)
