@@ -14,26 +14,31 @@ from motif_based_encoder import one_hot_encode_seq, pad_one_hot_encoded_seq, Mot
 # Constants
 gb = torch.tensor([0.25, 0.25, 0.25, 0.25])
 BASE_TO_INDEX = {'A': 0, 'C': 1, 'G': 2, 'T': 3}  # bases are of the order ACGT
-FILES_DIR = "./ortholog_promoters_per_gene"
-TRAIN_LENGTH = 800
-TRAIN_MIN_NUM_ORTHOLOGS = 9
-TRAIN_MIN_SEQ_LENGTH = 80
-MODEL_OUTPUTS_DIR = "model_outputs_idr"
+FILES_DIR = "./ortholog_UTRs_per_gene"
+TRAIN_LENGTH = 800  # 800 for promoters or 200 for 3'UTRs
+TRAIN_MIN_NUM_ORTHOLOGS = 9  # family_size + 1
+TRAIN_MIN_SEQ_LENGTH = 80  # 10% of TRAIN_LENGTH
+MODEL_OUTPUTS_DIR = "model_outputs_promoter_clad_V_PWMs_constrained_fam_size_8"
 
 REPRESENTATION_LENGTH = 500
 REPRESENTATION_MIN_NUM_ORTHOLOGS = 2
-REPRESENTATION_MIN_SEQ_LENGTH = 15
+REPRESENTATION_MIN_SEQ_LENGTH = 15  # PWMs_width
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.devide("cpu")
+device = torch.device("cpu")
+
+HOMOLOGOUS_SPECIES = ["caenorhabditis_angaria", "caenorhabditis_auriculariae", "caenorhabditis_becei", "caenorhabditis_bovis",
+           "caenorhabditis_brenneri", "caenorhabditis_briggsae", "caenorhabditis_elegans", "caenorhabditis_inopinata",
+           "caenorhabditis_japonica", "caenorhabditis_latens", "caenorhabditis_nigoni", "caenorhabditis_panamensis",
+           "caenorhabditis_parvicauda", "caenorhabditis_quiockensis", "caenorhabditis_remanei", "caenorhabditis_sinica",
+           "caenorhabditis_sulstoni", "caenorhabditis_tribulationis", "caenorhabditis_tropicalis",
+           "caenorhabditis_uteleia", "caenorhabditis_waitukubuli", "caenorhabditis_zanzibari"]
+# HOMOLOGOUS_SPECIES = = [] If all species are to be considered
 
 os.makedirs(MODEL_OUTPUTS_DIR, exist_ok=True)
 
 
-"""TRAIN_MIN_NUM_ORTHOLOGS = 5 => 13354 genes; TRAIN_MIN_NUM_ORTHOLOGS = 9 => 12403 genes (335816 sequences)."""
-
-
 def read_files(files_dir: str, target_length: int, min_num_orthologs: int, min_sequence_length: int,
-               base_to_index: dict[str, int]) -> dict[str, list[torch.tensor]]:
+               base_to_index: dict[str, int], species_to_consider=None) -> dict[str, list[torch.tensor]]:
     """Return a dictionary of the form:
     key: gene id (string)
     value: list of tensors where each is a one-hot encoded sequence of an orthologous sequence
@@ -66,7 +71,11 @@ def read_files(files_dir: str, target_length: int, min_num_orthologs: int, min_s
         with open(path, "r") as file:
             gene_promoters = json.load(file)
         valid_sequences = []
-        for sequence in gene_promoters.values():
+        for species, sequence in gene_promoters.items():
+            # check if the species is part of <species_to_consider> if a list is given
+            if species_to_consider is not None:
+                if species not in species_to_consider:
+                    continue
             # Check if invalid bases are present
             if not set(sequence.upper()).issubset(base_to_index.keys()):
                 continue
@@ -132,30 +141,28 @@ def split_into_batches(genes_list: list[str], batch_size: int) -> list[list[str]
     return genes_in_batches
 
 
-def get_encoder_inputs_from_batch(genes_dict: dict[str, list[torch.tensor]], batch_of_genes: list[str],
-                                  family_size: int) -> torch.tensor:
+def get_encoder_inputs_from_batch(genes_dict: dict[str, list[torch.tensor]], batch_of_genes: list[str]) -> torch.tensor:
     """Return the inputs of the encoder for each batch, which is a tensor of shape (num_seqs, num_bases, seq_length).
 
     <genes_dict> is a dictionary of the form: key (gene id) and value (list of one-hot encoded tensors for the
-    orthologous promoter sequences). <geneS_dict> could either be the train set or validation set which are the result
+    orthologous promoter sequences). <genes_dict> could either be the train set or validation set which are the result
     of calling the function <split_data>. <batch_of_genes> is a list of gene names that represent the genes whose
     sequences will be processed for the current batch; it is one of the inner lists of the list which is the result of
     calling the function <split_into_batches>.
 
     <num_seqs> is determined as follows:
-    - For each gene in <batch_of_genes>, extract randomly <family_size> + 1 one-hot encoded orthologous sequences from
-    <genes_dict>. Each of these orthologous sequences are a tensor of shape (num_bases, seq_length).
-    - These sequences for each gene are stacked on top of each other and so <num_seqs> = (<family_size> + 1) *
-    len(<batch_of_genes>)
+    - For each gene in <batch_of_genes>, extract all its one-hot encoded orthologous sequences from <genes_dict>. Each
+    of these orthologous sequences are a tensor of shape (num_bases, seq_length).
+    - These <num_seqs> sequences for each gene are stacked on top of each other.
     <num_bases> = 4 (4 nucleotides)
-    <seq_length> = target_length which was used during the call of the function <read_files>, which is 800 for sequences
-    used for training and 500 for sequences used for encoding."""
+    <seq_length> = target_length which was used during the call of the function <read_files>, which is 800 for promoter
+    sequences and 200 for 3'UTR sequences used for training and 500 for promoter sequences and 200 for 3'UTR sequences
+    used for encoding."""
 
-    # Create a nested list of sequences per gene
-    batch_of_seqs = [random.sample(genes_dict[gene], family_size + 1) for gene in batch_of_genes]
+    # Put all sequences of a gene in the input tensor
+    batch_of_seqs = [genes_dict[gene] for gene in batch_of_genes]
 
-    # Flatten the list so that all sequences are in one list (first <family_size> + 1 seqs refer to first gene,
-    # followed by seqs for the second gene and so on)
+    # Flatten the list so that all sequences are in one list
     batch_of_seqs_flat = [seq for list_of_seqs in batch_of_seqs for seq in list_of_seqs]
 
     # Stack the seqs into a single tensor of shape (num_seqs, num_bases, seq_length) where the shape of the seqs was
@@ -168,7 +175,7 @@ def get_encoder_inputs_from_batch(genes_dict: dict[str, list[torch.tensor]], bat
 def get_seqs_outside_batch(genes_dict: dict[str, list[torch.tensor]],
                            batch_of_genes: list[str], n: int) -> list[torch.tensor]:
     """Return a list of <n> tensors which are one-hot encoded sequences of shape (num_bases, seq_length). Each sequence
-    is randomly chosen from the list of orhologous sequences, stored in <genes_dict> for genes not part of genes in
+    is randomly chosen from the list of orthologous sequences, stored in <genes_dict> for genes not part of genes in
     <batch_of_genes>. These sequences will act as the negative sequences in the target sets for the current batch of
     genes <batch_of_genes>.
 
@@ -194,7 +201,8 @@ def get_seqs_outside_batch(genes_dict: dict[str, list[torch.tensor]],
     return negative_sequences_outside_batch
 
 
-def calculate_logits(seqs_embeddings: torch.tensor, family_size: int, num_genes_in_batch: int, target_set_size: int,
+def calculate_logits(genes_dict: dict[str, list[torch.tensor]], batch_of_genes: list[str],
+                     seqs_embeddings: torch.tensor, family_size: int, target_set_size: int,
                      temperature: float) -> tuple[torch.tensor, torch.tensor]:
     """Return a tuple of labels and logits tensors where the labels tensor, for each gene family in the batch, specifies
     the index of the class that would be considered as the correct classification (the index of the dot product between
@@ -202,24 +210,24 @@ def calculate_logits(seqs_embeddings: torch.tensor, family_size: int, num_genes_
     batch, the dot product between the family embedding and the target set, where the target set is made up of 1
     positive target and <target_set_size> - 1 negative targets. These dot products are scaled by <temperature>.
 
-    The size of the labels return value tensor is <num_genes_in_batches> and the shape of the logits return value
-    tensor is (num_genes_in_batches, target_set_size>).
+    The size of the labels return value tensor is <seqs_embeddings>.shape[0] (number of sequences passed through the
+    model) and the shape of the logits return value tensor is (<seqs_embeddings>.shape[0], target_set_size>).
 
-    The input to the encoder whose output is <seqs_embeddings> tensor, which is of shape (num_seqs, num_PWMs) where
-    num_seqs = (<num_genes_in_batch> * (<family_size> + 1) + (target_set_size - <num_genes_in_batches>)), follows this
-    order:
-    - There are <num_genes_in_batch> gene families where each family has <family_size> + 1 orthologous sequences,
-    followed by <target_set_size> - <num_genes_in_batches> out-of-batch sequences where each sequence belongs to a
-    different out-of-batch gene family.
-    - Every (family_size) + 1 representations are a group that represent the representations of orthologous sequences
-    from a single gene
-    - The first <family_size> representations would be used to represent the family embeddings of that gene and the last
-    sequence in that group would be used as the positive target for the current gene family and a negative target for
-    the other gene families.
-    - The last (target_set_size - <num_genes_in_batches>) representations represent individual sequences from
-    out-of-batch genes that would in addition to the other <num_genes_in_batches> target sequences, be used as negative
-    sequences in the target set. If <num_genes_in_batches> is equal to <target_set_size>, these sequences would not be
-    needed.
+    The input to the encoder, whose output is <seqs_embeddings> tensor, is of shape (num_seqs, num_PWMs) where
+    num_seqs includes all orthologous sequences for each gene in <batch_of_genes> and out-of-batch sequences where each
+    sequence belongs to a different out-of-batch gene family. and the number of those out-of-batch sequences is
+    <target_set_size> - len(<batch_of_genes>); they represent individual sequences that would in addition to the other
+    target sequences be used as negative sequences in the target set. If len(<batch_of_genes>) is equal to
+    <target_set_size>, these sequences would not be needed.
+
+    This loss function goes through every sequence in every gene in <batch_of_genes> and makes it as a positive sequence
+    and determines the dot product between it and the family embedding and compares it to the dot product between the
+    same family embedding and other negative sequences, where one sequence per other gene families in the batch would be
+    used as negative sequences, alongside the out-of-batch negative sequences.
+
+    For each orthologous sequence for each gene family, the family embedding is determined by randomly choosing
+    <family_size> sequences from the same gene family and taking their average. The negative sequences are also chosen
+    randomly from other in-batch gene families.
 
     The temperature-scaled dot product between the family embeddings and the positive target is placed at index 0 and
     that between the family embeddings and the negative targets are placed at the rest of the indices for each gene
@@ -227,60 +235,93 @@ def calculate_logits(seqs_embeddings: torch.tensor, family_size: int, num_genes_
     index 0 for each gene family."""
 
     seqs_embeddings = F.normalize(seqs_embeddings, dim=1)
-    num_batch_seqs = num_genes_in_batch * (family_size + 1)
+    # Find the number of sequences that are part of the batch (and not part of the negative sequences)
+    # The values in <batch_genes_num_seqs> are the number of sequences each gene has, and so it is the same length as
+    # batch_of_genes
+    batch_genes_num_seqs = [len(genes_dict[gene]) for gene in batch_of_genes]
+    num_batch_seqs = sum(batch_genes_num_seqs)
+
     # Create the labels (indicator variable)
-    labels = torch.zeros(num_genes_in_batch, dtype=torch.long)  # positive class is at zero index for each query
+    labels = torch.zeros(num_batch_seqs, dtype=torch.long)  # positive class is at zero index for each query
 
     # Create the logits variable which represents dot products between the family embeddings and single sequences,
     # scaled by temperature
-    logits = torch.zeros(num_genes_in_batch, target_set_size)
+    logits = torch.zeros(num_batch_seqs, target_set_size)
 
-    # Get the indices of all negative samples (anchors + negative samples from outside of the current batch)
-    all_batch_negative_samples_indices = [i for i in range(family_size, num_batch_seqs, family_size + 1)]
-    all_non_batch_negative_indices = [i for i in range(all_batch_negative_samples_indices[-1] + 1, len(seqs_embeddings))]
-    all_negative_samples_indices = all_batch_negative_samples_indices + all_non_batch_negative_indices
+    # Get the indices of the non-batch negative samples
+    # The other negative samples would be randomly chosen from each non-family gene in the loop
+    all_non_batch_negative_indices = [i for i in range(num_batch_seqs, len(seqs_embeddings))]
 
     curr_sample = 0
-    for start_of_family in range(0, num_batch_seqs, family_size + 1):
-        # Get the family embedding representation
-        family_tensors = seqs_embeddings[start_of_family:(start_of_family + family_size)]
-        family_embedding = torch.mean(family_tensors, dim=0)  # shape (num_PWMs,)
-        family_embedding = F.normalize(family_embedding, dim=0)
+    for gene_index, num_seqs in enumerate(batch_genes_num_seqs):
+        total_num_prev_seqs = sum(batch_genes_num_seqs[:gene_index])
+        # Go through every sequence for every gene and make it a positive sample
+        for i in range(0, num_seqs):
+            # Get the family embedding representation (randomly choose <family_size> sequences as the family other than
+            # the current gene)
+            all_other_family_members = [j for j in range(0, num_seqs) if j != i]
+            family_members_sample = random.sample(all_other_family_members, family_size)
+            family_members_samples_indices = [index + total_num_prev_seqs for index in family_members_sample]
+            family_tensors = seqs_embeddings[family_members_samples_indices]
+            family_embedding = torch.mean(family_tensors, dim=0)  # shape (num_PWMs,)
+            family_embedding = F.normalize(family_embedding, dim=0)
 
-        # Get the positive anchor embedding
-        positive_anchor = seqs_embeddings[start_of_family + family_size]  # shape (num_PWMs,)
-        positive_anchor = positive_anchor.unsqueeze(0)  # shape (1, num_PWMs)
-        # Extract the negative single sequence embeddings
-        curr_negative_samples = [index for index in all_negative_samples_indices if index != start_of_family + family_size]
-        negative_sequences_embeddings = seqs_embeddings[curr_negative_samples]  # shape (<target_set_size> - 1, num_PWMs)
+            # Get the positive anchor embedding
+            positive_anchor = seqs_embeddings[total_num_prev_seqs + i]  # shape (num_PWMs,)
+            positive_anchor = positive_anchor.unsqueeze(0)  # shape (1, num_PWMs)
 
-        # Combine the embeddings of the single sequences where the positive anchor embedding is on top and all other
-        # negative single sequences are under it
-        single_sequences_embeddings = torch.cat((positive_anchor, negative_sequences_embeddings), dim=0)  # shape (<target_set_size>, num_PWMs)
+            # Get the negative single sequence embeddings
+            # Randomly choose negative sequences from the sequences from other genes, one sequence per other gene in the
+            # batch, then add the sequences from <all_non_batch_negative_indices>
+            batch_negative_indices = get_negative_indices(batch_genes_num_seqs)
+            del batch_negative_indices[gene_index]  # delete the negative sequence index for the current gene
+            all_negative_samples_indices = batch_negative_indices + all_non_batch_negative_indices
+            negative_sequences_embeddings = seqs_embeddings[all_negative_samples_indices]
 
-        # Calculate the dot product between the family and single sequences embeddings, scaled by temperature
-        family_scores = torch.matmul(single_sequences_embeddings, family_embedding) / temperature
+            # Combine the embeddings of the single sequences where the positive anchor embedding is on top and all other
+            # negative single sequences are under it
+            single_sequences_embeddings = torch.cat((positive_anchor, negative_sequences_embeddings),
+                                                    dim=0)  # shape (<target_set_size>, num_PWMs)
 
-        # Update the logits variable
-        logits[curr_sample] = family_scores
-        curr_sample = curr_sample + 1
+            # Calculate the dot product between the family and single sequences embeddings, scaled by temperature
+            family_scores = torch.matmul(single_sequences_embeddings, family_embedding) / temperature
+
+            # Update the logits variable
+            logits[curr_sample] = family_scores
+            curr_sample = curr_sample + 1
 
     return labels, logits
 
 
-def infoNCE_loss(seqs_embeddings: torch.tensor, family_size: int, num_genes_in_batch: int, target_set_size: int,
+# Helper function for <calculate_logits>
+def get_negative_indices(batch_genes_num_seqs: list[int]) -> list[int]:
+    """Return a list of integers, and it is of the same length as <batch_genes_num_seqs>, where for each value in
+     <batch_genes_num_seqs>, a random integer between 0 inclusive and the value exclusive is chosen.
+
+     These numbers would act as the indices of the negative sequences for each gene's family that would be used in the
+     calculation of the loss function in the function <calculate_logits>. These numbers are adjusted in the function so
+     that they would be the real indices in the <seqs_embeddings> variable in <calculate_logits>."""
+
+    negative_indices = []
+    for gene_index, num_seqs in enumerate(batch_genes_num_seqs):
+        total_num_prev_seqs = sum(batch_genes_num_seqs[:gene_index])
+        curr_gene_family_negative_sample_index = random.sample([i for i in range(0, num_seqs)], 1)[0]
+        negative_indices.append(curr_gene_family_negative_sample_index + total_num_prev_seqs)
+    return negative_indices
+
+
+def infoNCE_loss(data_set, batch_of_genes, seqs_embeddings: torch.tensor, family_size: int, target_set_size: int,
                  temperature: float):
-    """Return the infoNCE loss for the samples in <seqs_embeddings>, which is of shape (num_seqs, num_PWMs). Excluding
-    the last batch, num_seqs = (<num_genes_in_batch> * (<family_size> + 1) + (target_set_size - <num_genes_in_batches>)).
+    """Return the infoNCE loss for the samples in <seqs_embeddings>, which is of shape (num_seqs, num_PWMs).
 
     The docstring of the <calculate_logits> function explains in detail how the infoNCE loss is calculated."""
 
     # Determine the labels and logits
-    labels, logits = calculate_logits(seqs_embeddings, family_size, num_genes_in_batch, target_set_size, temperature)
+    labels, logits = calculate_logits(data_set, batch_of_genes, seqs_embeddings, family_size, target_set_size,
+                                      temperature)
 
-    # Calculate the Categorical Cross Entropy loss between the indicator variable <labels> and <logits>
-    # (does softmax internally)
-    loss = F.cross_entropy(logits, labels)
+    # Calculate the Categorical Cross Entropy loss between the indicator variable <labels> and the <logits> variable
+    loss = F.cross_entropy(logits, labels)  # (does softmax internally)
 
     return loss
 
@@ -304,7 +345,7 @@ def evaluate_representations(model: MotifBasedEncoder, data_set: dict[str, list[
     with torch.no_grad():
         for batch_of_genes in genes_in_batches:
             num_genes_in_batch = len(batch_of_genes)
-            inputs = get_encoder_inputs_from_batch(data_set, batch_of_genes, family_size)
+            inputs = get_encoder_inputs_from_batch(data_set, batch_of_genes)
             # Fetch the extra negative sequences from genes outside the current batch
             num_non_batch_negative_seqs_to_add = target_set_size - num_genes_in_batch
             negative_seqs_outside_batch = get_seqs_outside_batch(data_set, batch_of_genes,
@@ -314,8 +355,9 @@ def evaluate_representations(model: MotifBasedEncoder, data_set: dict[str, list[
             inputs = inputs.to(device)
             seqs_embeddings = model(inputs)
 
-            labels, logits = calculate_logits(seqs_embeddings, family_size, num_genes_in_batch, target_set_size, temperature)
-            predicted = torch.argmax(logits, dim=1)  # shape (len(batch_of_genes),)
+            labels, logits = calculate_logits(data_set, batch_of_genes, seqs_embeddings, family_size, target_set_size,
+                                              temperature)
+            predicted = torch.argmax(logits, dim=1)
 
             total = total + labels.size(0)
             correct = correct + (predicted == labels).sum().item()
@@ -333,12 +375,12 @@ def train_motif_based_encoder(train_set: dict[str, list[torch.tensor]], val_set:
     trained on <train_set>, and validated at every epoch on <val_set>.
 
     The adam optimizer with learning rate <learning_rate> is used and a learning rate scheduler where the learning rate
-    decreases if the validation accuracy plateaus with patience of 10. The samples are batched with batch size
+    decreases if the validation accuracy plateaus with patience of 5. The samples are batched with batch size
     <batch_size> where the <split_into_batches> function is used to split the <train_set> and <val_set> into batches and
     then for every batch of genes, the <get_encoder_inputs_from_batch> function is used to get the sequences in the
-    right form for being input into the encoder, which requires the <family_size> parameter. <model> uses the infoNCE
-    loss for parameter updates, which requires the <temperature> parameter, and the <target_set_size> parameter to
-    determine the number of target set sequences to be used for every family embedding.
+    right form for being input into the encoder. <model> uses the infoNCE loss for parameter updates, which requires the
+    <temperature> and <family_size> parameters as well as the <target_set_size> parameter to determine the number of
+    target set sequences to be used for every family embedding.
 
     After every parameter update, different constraints to the <model> weights are enforced:
     - the weights for the PWM_convs layer in <model> are constrained by the PWM_constraint module.
@@ -350,47 +392,50 @@ def train_motif_based_encoder(train_set: dict[str, list[torch.tensor]], val_set:
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5)
 
-    # Set up the training loop
+    # Set up the variables to be returned after the model finishes training
     train_loss_epochs = []
     val_loss_epochs = []
     train_accuracy_epochs = []
     val_accuracy_epochs = []
+
+    # Set up the training loop
     for epoch in range(num_epochs):
         model.train()
         # Randomly split the training set into groups of size <batch_size>
         all_train_genes = list(train_set.keys())
         genes_in_batches = split_into_batches(all_train_genes, batch_size)
         train_loss_step = []
-        # Loop over every batch of genes
         for batch_of_genes in genes_in_batches:
             optimizer.zero_grad()
             num_genes_in_batch = len(batch_of_genes)
 
-            # Only keep <family_size> + 1 orthologous sequences for each gene and consider the first <family_size>
-            # elements to be the query set (represent the family embeddings) and the last element to be the target set
-            # for that family.
-            inputs = get_encoder_inputs_from_batch(train_set, batch_of_genes, family_size)  # shape (num_seqs, num_bases, seq_length)
+            # Consider all orthologous sequences for each gene in the current batch
+            inputs = get_encoder_inputs_from_batch(train_set, batch_of_genes)  # shape (num_seqs, num_bases, seq_length)
             # Fetch the extra negative sequences from genes outside the current batch
             num_non_batch_negative_seqs_to_add = target_set_size - num_genes_in_batch
             negative_seqs_outside_batch = get_seqs_outside_batch(train_set, batch_of_genes,
                                                                  num_non_batch_negative_seqs_to_add)
-            # Add those sequences to the end of the <inputs>
+            # Add those out-of-batch negative sequences to the end of the <inputs>
             inputs = torch.cat([inputs, torch.stack(negative_seqs_outside_batch)], dim=0)
             inputs = inputs.to(device)
-            seqs_embeddings = model(inputs)  # shape (num_seqs, num_PWMs) (num_seqs, l3)
-            loss = infoNCE_loss(seqs_embeddings, family_size, num_genes_in_batch, target_set_size, temperature)
+
+            # Run the <inputs> into the encoder and update the parameters
+            seqs_embeddings = model(inputs)  # shape (num_seqs, num_PWMs or l3)
+            loss = infoNCE_loss(train_set, batch_of_genes, seqs_embeddings, family_size,
+                                target_set_size, temperature)
             loss.backward()
             optimizer.step()
+            train_loss_step.append(loss.item())
+
             # Implement constraints on multiple layers
             with torch.no_grad():
-                # Implement the constraint on the PWM motifs
-                model.PWMs_conv.weight.data.copy_(model.PWM_constraint(model.PWMs_conv.weight.data))
                 # Implement the constraint on the Scaling layer
                 model.scaling_layer.scale.clamp_(min=0.1)
                 model.scaling_layer.bias.clamp_(min=0)
                 # Implement the constraint on the pooling layer
                 model.pooling_layer.pooling.clamp_(min=0)
-            train_loss_step.append(loss.item())
+
+        # Add the average loss for the training dataset for this epoch
         train_loss_epochs.append(np.array(train_loss_step).mean())
 
         # Set up the validation loop to calculate the validation loss after one epoch of training
@@ -399,10 +444,12 @@ def train_motif_based_encoder(train_set: dict[str, list[torch.tensor]], val_set:
         all_val_genes = list(val_set.keys())
         genes_in_batches = split_into_batches(all_val_genes, batch_size)
         val_loss_step = []
+        curr_loop = 1
         with torch.no_grad():
             for batch_of_genes in genes_in_batches:
+                curr_loop += 1
                 num_genes_in_batch = len(batch_of_genes)
-                inputs = get_encoder_inputs_from_batch(val_set, batch_of_genes, family_size)
+                inputs = get_encoder_inputs_from_batch(val_set, batch_of_genes)
                 # Fetch the extra negative sequences from genes outside the current batch
                 num_non_batch_negative_seqs_to_add = target_set_size - num_genes_in_batch
                 negative_seqs_outside_batch = get_seqs_outside_batch(val_set, batch_of_genes,
@@ -410,56 +457,46 @@ def train_motif_based_encoder(train_set: dict[str, list[torch.tensor]], val_set:
                 # Add those sequences to the end of the <inputs>
                 inputs = torch.cat([inputs, torch.stack(negative_seqs_outside_batch)], dim=0)
                 inputs = inputs.to(device)
+
+                # Run the <inputs> through the encoder and calculate the loss, without updating the model parameters
                 seqs_embeddings = model(inputs)
-                loss = infoNCE_loss(seqs_embeddings, family_size, num_genes_in_batch, target_set_size, temperature)
+                loss = infoNCE_loss(val_set, batch_of_genes, seqs_embeddings, family_size, target_set_size, temperature)
                 val_loss_step.append(loss.item())
+
+            # Add the average loss for the validation dataset for this epoch
             val_loss_epochs.append(np.array(val_loss_step).mean())
 
+        # Pass into the scheduler the current validation loss value
         scheduler.step(val_loss_epochs[epoch])
 
-        # Determine the current accuracy of the model
-        training_accuracy = evaluate_representations(model, train_set, family_size, batch_size, target_set_size, temperature)
-        validation_accuracy = evaluate_representations(model, val_set, family_size, batch_size, target_set_size, temperature)
+        # Determine the current accuracy of the model for both the training and validation data sets
+        training_accuracy = evaluate_representations(model, train_set, family_size, batch_size, target_set_size,
+                                                     temperature)
+        validation_accuracy = evaluate_representations(model, val_set, family_size, batch_size, target_set_size,
+                                                       temperature)
         train_accuracy_epochs.append(training_accuracy)
         val_accuracy_epochs.append(validation_accuracy)
 
         # Print the loss of the training and validation data sets after one epoch
         print(
-            f"After epoch {epoch + 1}: training loss = {train_loss_epochs[epoch]}, validation loss = {val_loss_epochs[epoch]}, \n"
-            f"               training accuracy = {training_accuracy}, validation accuracy = {validation_accuracy}")
+            f"After epoch {epoch + 1}: training loss = {train_loss_epochs[epoch]}, validation loss = {val_loss_epochs[epoch]}, "
+            f"training accuracy = {training_accuracy}, validation accuracy = {validation_accuracy}")
 
     print("Finished Training!")
 
     return train_loss_epochs, val_loss_epochs, train_accuracy_epochs, val_accuracy_epochs
 
 
-def get_rhiepa_representations(model: MotifBasedEncoder,
-                               valid_genes: dict[str, list[torch.tensor]]) -> dict[str, list[float]]:
-    """Return the representation for every gene's promoter in <valid_genes> as determined by the trained model <model>.
-    The return value is a dictionary of the form:
-    key: gene id (string)
-    value: list of pam scores of size num_PWMs where there is a PAM score for every PWM which the model learned during
-    previous training. The PAM scores are determined by taking the average of the representation of all the orthologous
-    promoter sequences for each gene."""
-
-    representation = {}
-    for gene in valid_genes:
-        inputs = torch.stack(valid_genes[gene])  # shape (num_orthologs, num_bases, seq_length)
-        inputs = inputs.to(device)
-        seqs_embeddings = model(inputs)  # shape (num_orthologs, num_PWMs)
-        pam_scores = torch.mean(seqs_embeddings, dim=0)
-        representation[gene] = pam_scores.tolist()
-    return representation
-
-
 if __name__ == "__main__":
 
+    """
     # Get the valid genes
     valid_genes = read_files(FILES_DIR, target_length=TRAIN_LENGTH, min_num_orthologs=TRAIN_MIN_NUM_ORTHOLOGS,
-                             min_sequence_length=TRAIN_MIN_SEQ_LENGTH, base_to_index=BASE_TO_INDEX)
+                             min_sequence_length=TRAIN_MIN_SEQ_LENGTH, base_to_index=BASE_TO_INDEX,
+                             species_to_consider=HOMOLOGOUS_SPECIES)
 
     # Save <valid_genes> to load later (it is taking a while...)
-    file_path = f"./{MODEL_OUTPUTS_DIR}/valid_genes_for_encoder.pkl"
+    file_path = f"./valid_genes_for_training.pkl"
     with open(file_path, "wb") as f:
         pickle.dump(valid_genes, f)
 
@@ -468,34 +505,31 @@ if __name__ == "__main__":
     for gene in valid_genes:
         seqs_num = seqs_num + len(valid_genes[gene])
     print(f"{len(valid_genes)} will be processed through the encoder with total {seqs_num} orthologous sequences.")
+    """
 
-    # load back the valid genes (if needed)
-    # file_path = f"./valid_genes_for_encoder_fam_size_8.pkl"
-    # with open(file_path, "rb") as f:
-    #     valid_genes = pickle.load(f)
+    # load back the valid genes
+    file_path = f"./valid_genes_for_training.pkl"
+    with open(file_path, "rb") as f:
+        valid_genes = pickle.load(f)
     print(f"The training of the model will start with {len(valid_genes)} genes.")
 
     # Split the data into training and validation data sets
     train_set, val_set = split_data(valid_genes)
 
     # Train the model on the valid genes
-    encoder = MotifBasedEncoder(num_PWMs=256, PWM_width=15, window=10, num_bases=4, set_initial_values=True)
-    encoder.to(device)
+    model = MotifBasedEncoder(num_PWMs=256, PWM_width=15, window=10, num_bases=4, set_initial_values=True)
+    model.to(device)
 
     # Save the initial weights of the model
-    torch.save(encoder.state_dict(), f"./{MODEL_OUTPUTS_DIR}/model_before_training.pt")
+    torch.save(model.state_dict(), f"./{MODEL_OUTPUTS_DIR}/model_before_training.pt")
 
     # Train the encoder
     train_loss_epochs, val_loss_epochs, train_accuracy_epochs, val_accuracy_epochs = train_motif_based_encoder(
-        train_set, val_set, encoder, family_size=8, batch_size=256, learning_rate=0.1, temperature=0.1, num_epochs=100,
-        target_set_size=400)
+        train_set, val_set, model, family_size=8, batch_size=64, learning_rate=0.0086, temperature=0.084,
+        num_epochs=100, target_set_size=400)
 
     # Save the model after training
-    torch.save(encoder.state_dict(), f"./{MODEL_OUTPUTS_DIR}/model_after_training.pt")
-    
-    # How to load the model back
-    # model = MotifBasedEncoder(num_PWMs=256, PWM_width=15, window=10, num_bases=4)
-    # model.load_state_dict(torch.load(f"./{MODEL_OUTPUTS_DIR}/model_after_training.pt"))
+    torch.save(model.state_dict(), f"./{MODEL_OUTPUTS_DIR}/model_after_training.pt")
 
     print("The loss values for the training set are:")
     print(train_loss_epochs)
