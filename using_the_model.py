@@ -18,7 +18,7 @@ FILES_DIR = "./ortholog_UTRs_per_gene"
 TRAIN_LENGTH = 800  # 800 for promoters or 200 for 3'UTRs
 TRAIN_MIN_NUM_ORTHOLOGS = 9  # family_size + 1
 TRAIN_MIN_SEQ_LENGTH = 80  # 10% of TRAIN_LENGTH
-MODEL_OUTPUTS_DIR = "model_outputs_promoter_clad_V_PWMs_constrained_fam_size_8"
+MODEL_OUTPUTS_DIR = "model_outputs_UTR_caenorhabditis_only_fs8_b32"
 
 REPRESENTATION_LENGTH = 500
 REPRESENTATION_MIN_NUM_ORTHOLOGS = 2
@@ -444,10 +444,8 @@ def train_motif_based_encoder(train_set: dict[str, list[torch.tensor]], val_set:
         all_val_genes = list(val_set.keys())
         genes_in_batches = split_into_batches(all_val_genes, batch_size)
         val_loss_step = []
-        curr_loop = 1
         with torch.no_grad():
             for batch_of_genes in genes_in_batches:
-                curr_loop += 1
                 num_genes_in_batch = len(batch_of_genes)
                 inputs = get_encoder_inputs_from_batch(val_set, batch_of_genes)
                 # Fetch the extra negative sequences from genes outside the current batch
@@ -508,7 +506,7 @@ if __name__ == "__main__":
     """
 
     # load back the valid genes
-    file_path = f"./valid_genes_for_training.pkl"
+    file_path = f"./valid_genes_for_encoder_fam_size_8_UTR_only_caenorhabditis_species.pkl"
     with open(file_path, "rb") as f:
         valid_genes = pickle.load(f)
     print(f"The training of the model will start with {len(valid_genes)} genes.")
@@ -517,7 +515,11 @@ if __name__ == "__main__":
     train_set, val_set = split_data(valid_genes)
 
     # Train the model on the valid genes
-    model = MotifBasedEncoder(num_PWMs=256, PWM_width=15, window=10, num_bases=4, set_initial_values=True)
+    model = MotifBasedEncoder(num_PWMs=128, PWM_width=10, window=5, num_bases=4, set_initial_values=True,
+                              consider_reverse_complement=False)  # for 3'UTRs
+    # model = MotifBasedEncoder(num_PWMs=256, PWM_width=15, window=10, num_bases=4, set_initial_values=True,
+    #                           consider_reverse_complement=True)  # for promoters
+
     model.to(device)
 
     # Save the initial weights of the model
@@ -525,7 +527,7 @@ if __name__ == "__main__":
 
     # Train the encoder
     train_loss_epochs, val_loss_epochs, train_accuracy_epochs, val_accuracy_epochs = train_motif_based_encoder(
-        train_set, val_set, model, family_size=8, batch_size=64, learning_rate=0.0086, temperature=0.084,
+        train_set, val_set, model, family_size=8, batch_size=32, learning_rate=0.01, temperature=0.15,
         num_epochs=100, target_set_size=400)
 
     # Save the model after training
