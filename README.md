@@ -35,9 +35,8 @@ genes and its orthologs
 5. Encoding of the promoter and 3'UTR sequences after training by averaging the representation over all available orthologs
 6. Comparison of the learned PWMs to available consensus motif databases for transcription factors and RNA binding proteins 
 using TomTom
-7. Go Enrichment Analysis
-8. Extra: Problems faced when building and testing the model
-9. References
+7. Extra: Problems faced when building and testing the model
+8. References
 
 ## 1. Homologous species selection and determination of orthologous genes using OrthoFinder
 
@@ -251,21 +250,52 @@ sequences were considered as valid for the encoder, with these genes being split
 Determining which genes are chosen is done through the `read_files` function, and the 90/10 split is done using the 
 `split_data` function.
 
-### 4.3 Chosen hyperparameters for training
+### 4.3 Choice of hyperparameters: Hyperparameter tuning using Pytorch-lightning and Optuna
 
 These are few of the hyperparameters chosen for the encoder:
-- family size of 8 or 4
+- family size of 8
 - target set size of 400
-- batch size of 64 or 256
+- batch size of 32
 - promoter sequence length of 800bp for training
 - promoter sequence length of 500bp for computing motif-based representations
 - 3'UTR sequence length of 200bp for training
 - 3'UTR sequence length of 200bp for computing motif-based representation
-- Adam optimizer with a learning rate of 0.001
+- Adam optimizer with a learning rate of 0.01
 - 256 PWMs with a width of 15bp for promoters
-- 128 PWMs with a width of 12bp for 3'UTRs
-- temperature of 0.1 for the infoNCE loss
+- 128 PWMs with a width of 10bp for 3'UTRs
+- temperature of 0.15 for the infoNCE loss
 - 100 epochs of training 
+
+The following hyperparameters were tuned, both when the family size was 8 and when it was 4:
+
+    # Hyperparameter search space
+    target_set_size = trial.suggest_categorical("target_set_size", [400, 600, 800])
+    learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-1, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [2 ** i for i in range(5, 8)])
+    temperature = trial.suggest_float("temperature", 0.05, 0.9)
+
+Hyperparameter tuning was done using Pytorch-lightning and Optuna, which can be found in the `hyperparameter_tune.py` script. 
+It wasn't as straightforward as it was implementing the hyperparameter search on the CIFAR-10 dataset in my previous projects, 
+so it took some further understanding of these two packages, but I was ultimately able to make it work on my model.
+
+After running 20 trials where each trial runs for a maximum of 10 epochs, the trial that reached the minimum validation loss 
+of 5.2 was the one with the following hyperparameters:
+    
+    batch_size = 32 | learning_rate = 0.0119 | temperature = 0.14949 | target_set_size = 400
+
+### 4.4 The loss and accuracy curves during training for both the training and validation datasets
+
+Out of the clad V species, I focused on the caenorhabditis only species out of them (22) due to high divergence among the 
+clad V species as a whole.
+
+After training for 100 epochs, using the resources of the Compute Canada cluster, these are the loss and accuracy curves 
+after training on the orthologous promoter sequences, with the addition of the non-linear projection head:
+
+<img width="2967" height="2968" alt="Image" src="https://github.com/user-attachments/assets/66fd722e-e502-4e75-94a6-59aa0678c5e1" />
+
+These are the loss and accuracy curves after training on the orthologous 3'UTR sequences:
+
+<img width="2967" height="2968" alt="Image" src="https://github.com/user-attachments/assets/09dd0ebd-e658-40f6-8c83-9aade09f6d3c" />
 
 ## 5. Encoding of the promoter and 3'UTR sequences after training by averaging the representation over all available orthologs
 
@@ -302,16 +332,12 @@ For the weights of a model trained on promoter sequences, they were compared to 
 For the weights of a model trained on 3'UTR sequences, they were compared to the CISBP-RNA Single Species RNA, Caenorhabditis_elegans 
 database which is made up of 20 motifs, between 6 and 8 in width (average width 7.1).
 
-## 7. Go Enrichment Analysis
-
-
-
-## 8. Extra: Problems faced when building and testing the model
+## 7. Extra: Problems faced when building and testing the model
 
 The contrastive learning algorithm went through multiple iterations, and I learned a lot by going through setbacks when 
 building and testing the model. Here are some of them, and how I handled each one:
 
-### 8.1 How and when to apply the PWM constraint on the weights of the convolutional layer
+### 7.1 How and when to apply the PWM constraint on the weights of the convolutional layer
 
 At first, I attempted to apply the PWM constraint after the model updated the parameters in every epoch, however the way 
 I implemented this led to breaking of the computational graph and the PWM weights would stop updating after a couple of 
@@ -330,7 +356,7 @@ version of the convolutional layers, and therefore the parameter updates should 
 constraint needs to be applied again so that the weights can be properly visualized as PWMs. This change lead to proper 
 training and learning of biologically-relevant PWMs.
 
-### 8.2 How many positive sequences to consider in every batch
+### 7.2 How many positive sequences to consider in every batch
 
 At first, to reduce the length of training time, I opted to pursue a similar training strategy that Alex et al. 2022 did, which 
 was to rather than consider every sequence as a positive anchor in a batch, I would only consider one sequence per gene as 
@@ -339,33 +365,7 @@ and negative sequences would be fixed per batch rather than randomly choosing th
 was much faster using this method (about 5 times faster), the current training strategy led to much better learning, i.e. better 
 motifs being learned, so I opted to stick to choosing every sequence in a batch as the positive anchor per epoch.
 
-### 8.3 Choice of hyperparameters: Hyperparameter tuning using Pytorch-lightning and Optuna
-
-Even though I ultimately ended up going through with the hyperparameters that Alan et al. 2025 paper chose, I attempted to 
-perform hyperparameter tuning using Pytorch-lightning and Optuna, which can be found in the `hyperparameter_tune.py` script. 
-It wasn't as straightforward as it was implementing the hyperparameter search on the CIFAR-10 dataset in my previous projects, 
-so it took some further understanding of these two packages, but I was ultimately able to make it work on my model. I only 
-did the hyperparameter search with a fixed family size of 8 on promoter sequences, and on the previous iterations of the model, 
-which is different from the current model I settled with, but even so, I thought it would be worth it including it here because 
-I learned from trying to implement this. I sought to perform hyperparameter tuning for these 4 hyperparameters:
-- learning rate, between 0.0001 - 0.1
-- temperature, between 0.05 - 0.9
-- target set size, either 400, 600, or 800
-- batch size, either 32, 64, 128, or 256
-
-After running 20 trials where each trial runs for a maximum of 10 epochs, the trial that reached the minimum validation loss 
-of 5.07 was the one with the following hyperparameters:
-    
-    batch_size = 64 | learning_rate = 0.0086 | temperature = 0.084 | target_set_size = 400
-
-These new values did lead to modest improvement in training, however, since these values are pretty close to the hyperparameter 
-values chosen in the Alan et al. 2025 paper, and again this hyperparameter search was done on a previous version of the 
-model, I opted to go for the hyperparameter values of the original paper. I first settled with a batch size of 64, however 
-I also ended up trying a batch size of 256, which ended up being better and lead to better learning, so I settled with that instead. 
-Extra note is that a bigger batch size leading to better learning is somewhat expected as was observed in the Chen et al. 2020 
-paper.
-
-## 9. References
+## 8. References
 
 Alan MM, et al. Inferring fungal cis-regulatory networks from genome sequences via unsupervised and interpretable representation 
 learning. biorxiv. 2025. doi: https://doi.org/10.1101/2025.02.27.640643
