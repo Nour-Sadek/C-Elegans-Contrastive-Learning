@@ -314,7 +314,31 @@ Averaged Motif (PAM) score for each PWM. This representation is generated using 
 in `creating_files_for_analysis.py` script. Then, this json file would be fed into the `create_java_treeview_files` function 
 in the same script to cluster the representations and generate the required files to visualize the heatmap in Java TreeView.
 
-### 5.3 The heatmaps for the learned representations of the promoter and 3'UTR sequences
+### 5.3 Visualization of the learned motif-based RHIEPA representations for the promoter and 3'UTR sequences
+
+The generation of the heatmaps is done using the `create_files_for_analysis.py` script. Specifically the `determine_rhiepa_representation` 
+function generates the json file which documents the RHIEPA representation score for each non-coding regulatory region
+(promoter or 3'UTR), then the `create_java_treeview_files` function generates the output file which can be read by the software 
+Java TreeView to allow for proper visualization of the motif-based RHIEPA scores representation heatmap. 
+
+The `determine_rhiepa_representation` function takes in the motif-based encoder and the orthologous sequences for each gene, and 
+runs the model on each of the groups of sequences to get the RHIEPA representation score per gene. The number of genes which 
+would be eligible is determined differently per non-coding region:
+- For promoters, eligible genes are those that have at least 2 orthologous promoter sequences that are at least 500bp long (only 
+the sequences that are at least 500bp long are kept and every sequence that is longer than that has been truncated from the 
+left side to be 500bp long). A total of 14067 genes were eligible for learned representation analysis for promoters.
+- For 3'UTRs, eligible genes are those that have at least 2 orthologous 3'UTR sequences that are 200bp long (only the 
+sequences that are 200bp long are kept). A total of 14079 genes were eligible for learned representation analysis for 3'UTRs.
+
+The `create_java_treeview_files` function utilizes the pythonic Bio.Cluster package and the columns (learned motifs) were 
+median centered, followed by performing hierarchical clustering on both the non-coding regions (rows) and learned motifs 
+(columns) using un-centered correlation, average linkage.
+
+### 5.4 Showcase of the output heatmaps
+
+This is the output heatmap of clustered promoter representations from Java TreeView.
+
+<img width="372" height="1118" alt="Image" src="https://github.com/user-attachments/assets/0d8c55f8-0761-4b1e-8b1e-76b2fb9417ac" />
 
 ## 6. Comparison of the learned PWMs to available consensus motif databases for transcription factors and RNA binding proteins using TomTom
 
@@ -328,6 +352,9 @@ PWMs between the matched motifs in the database and the user-given motifs.
 For the weights of a model trained on promoter sequences, they were compared to two motif databases:
 - the JASPAR (NON-REDUNDANT) DNA, JASPAR CORE (2024) nematodes database which is made up of 103 motifs, between 5 and 15 in width (average width 8.7).
 - the CIS-BP 2.00 Single Species DNA, Caenorhabditis_elegans database which is made up of 287 motifs, between 6 and 21 in width (average width 9.8).
+
+The two HTML files after running TomTom on the learned TF motifs can be accessed through the `Tomtom cisbp2 c elegans Results.html` 
+and `Tomtom JASPAR nematodes Results.html` files.
 
 For the weights of a model trained on 3'UTR sequences, they were compared to the CISBP-RNA Single Species RNA, Caenorhabditis_elegans 
 database which is made up of 20 motifs, between 6 and 8 in width (average width 7.1).
@@ -376,6 +403,8 @@ PLOS Comput Biol. 2022;18: e1010238. doi:10.1371/journal.pcbi.1010238
 Ali TB, et al. An intrinsically interpretable neural network architecture for sequence to function learning. 
 bioRxiv; 2023. p. 2023.01.25.525572. doi:10.1101/2023.01.25.525572
 
+Alok J. Saldanha, Java Treeview—extensible visualization of microarray data, Bioinformatics, Volume 20. https://jtreeview.sourceforge.net/
+
 Amy XL, et al. Evolution Is All You Need: Phylogenetic Augmentation for Contrastive Learning. arXiv; 2020. 
 doi:10.48550/arXiv.2012.13475
 
@@ -387,6 +416,8 @@ doi:10.1186/s13059-019-1832-y
 
 Kevin LH, et al. WormBase Parasite - a comprehensive resource for helminth genomics. Molecular and Biochemical Parasitology, 
 Volume 215, July 2017, Pages 2-10, https://doi.org/10.1016/j.molbiopara.2016.11.005
+
+M. J. L. de Hoon, S. Imoto, J. Nolan, and S. Miyano: Open Source Clustering Software. Bioinformatics, 20 (9): 1453--1454 (2004). http://bonsai.hgc.jp/~mdehoon/software/cluster/
 
 Shobhit G, John AS, Timothy LB, William SN. Quantifying similarity between motifs. Genome Biology, 8(2):R24, 2007. 
 doi: https://doi.org/10.1186/gb-2007-8-2-r24
